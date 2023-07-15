@@ -89,12 +89,14 @@ struct State {
 }
 
 #[codable]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum Pet {
     Dog(Dog),
     Cat(Cat),
 }
 
 #[codable]
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct Dog {
     name: String,
     age: u8,
@@ -112,6 +114,7 @@ impl Dog {
 }
 
 #[codable]
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct Cat {
     name: String,
     age: u8,

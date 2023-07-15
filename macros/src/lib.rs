@@ -567,9 +567,8 @@ pub fn rpc_handler(
 
 #[proc_macro_attribute]
 /// Takes any ast as an input and annotates it with useful attributes for data
-/// serialization and deserialization. This includes [rkyv]'s `Archive`,
-/// `Serialize`, `Deserialize` and `CheckBytes` traits, as well as `PartialEq`,
-/// `Debug`, `Clone`.
+/// serialization and deserialization. This consists of `Archive + Serialize + Deserialize`,
+/// for the root type and `CheckBytes + PartialEq` for the archived version.
 pub fn codable(
     _attr: proc_macro::TokenStream,
     item: proc_macro::TokenStream,
@@ -577,7 +576,7 @@ pub fn codable(
     let input = parse_macro_input!(item as syn::Item);
 
     let expanded = quote! {
-        #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, PartialEq, Debug, Clone)]
+        #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
         #[archive_attr(derive(PartialEq, rkyv::CheckBytes))]
         #input
     };

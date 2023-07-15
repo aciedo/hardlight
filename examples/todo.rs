@@ -84,12 +84,14 @@ trait Todo {
 }
 
 #[codable]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum TaskStatus {
     Todo,
     Done,
 }
 
 #[codable]
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct Task {
     text: String,
     status: TaskStatus,
