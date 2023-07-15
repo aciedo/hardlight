@@ -219,7 +219,8 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let shared_code = quote! {
         #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
-        #[archive_attr(derive(bytecheck::CheckBytes))]
+        #[archive_attr(derive(hardlight::bytecheck::CheckBytes))]
+        #[archive(crate = "hardlight::rkyv")]
         #[repr(u8)]
         #vis enum RpcCall {
             #(#rpc_variants),*
@@ -568,7 +569,7 @@ pub fn rpc_handler(
 #[proc_macro_attribute]
 /// Takes any ast as an input and annotates it with useful attributes for data
 /// serialization and deserialization. This consists of `Archive + Serialize + Deserialize`,
-/// for the root type and `CheckBytes + PartialEq` for the archived version.
+/// for the root type and `CheckBytes` for the archived version.
 pub fn codable(
     _attr: proc_macro::TokenStream,
     item: proc_macro::TokenStream,
@@ -576,8 +577,9 @@ pub fn codable(
     let input = parse_macro_input!(item as syn::Item);
 
     let expanded = quote! {
-        #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-        #[archive_attr(derive(PartialEq, rkyv::CheckBytes))]
+        #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
+        #[archive_attr(derive(hardlight::bytecheck::CheckBytes))]
+        #[archive(crate = "hardlight::rkyv")]
         #input
     };
 

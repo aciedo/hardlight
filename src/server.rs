@@ -3,14 +3,19 @@ use std::{io, net::SocketAddr, str::FromStr, sync::Arc};
 use async_trait::async_trait;
 use flate2::Compression;
 use futures_util::{SinkExt, StreamExt};
-use rcgen::generate_simple_self_signed;
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
     sync::{broadcast, mpsc, oneshot},
 };
+
+#[cfg(not(feature = "disable-self-signed"))]
+use tokio_rustls::rustls::{Certificate, PrivateKey};
+#[cfg(not(feature = "disable-self-signed"))]
+use rcgen::generate_simple_self_signed;
+
 use tokio_rustls::{
-    rustls::{Certificate, PrivateKey, ServerConfig as TLSServerConfig},
+    rustls::ServerConfig as TLSServerConfig,
     TlsAcceptor,
 };
 use tokio_tungstenite::{
