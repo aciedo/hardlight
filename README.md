@@ -1,4 +1,4 @@
-# HardLight [![Crates.io](https://img.shields.io/crates/v/hardlight)](https://crates.io/crates/hardlight) [![Docs.rs](https://docs.rs/hardlight/badge.svg)](https://docs.rs/hardlight) [![Chat](https://img.shields.io/badge/discuss-chat.valera.co-DCFF50)](https://chat.valera.co/public/channels/hardlight)
+# HardLight [![Crates.io](https://img.shields.io/crates/v/hardlight)](https://crates.io/crates/hardlight) [![Docs.rs](https://docs.rs/hardlight/badge.svg)](https://docs.rs/hardlight) [![Chat](https://img.shields.io/badge/discuss-z.valera.co-DCFF50)](https://z.valera.co/#narrow/stream/15-hardlight)
 
 A secure, real-time, low-latency binary WebSocket RPC subprotocol.
 
