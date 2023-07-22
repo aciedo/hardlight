@@ -220,7 +220,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
     let shared_code = quote! {
         #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
         #[archive_attr(derive(hardlight::bytecheck::CheckBytes))]
-        #[archive(crate = "hardlight::rkyv")]
+        #[archive(crate = "self::rkyv")]
         #[repr(u8)]
         #vis enum RpcCall {
             #(#rpc_variants),*
@@ -579,7 +579,7 @@ pub fn codable(
     let expanded = quote! {
         #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
         #[archive_attr(derive(hardlight::bytecheck::CheckBytes))]
-        #[archive(crate = "hardlight::rkyv")]
+        #[archive(crate = "self::rkyv")]
         #input
     };
 
