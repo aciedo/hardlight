@@ -578,8 +578,9 @@ pub fn codable(
 
     let expanded = quote! {
         #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
-        #[archive_attr(derive(::hardlight::bytecheck::CheckBytes))]
-        #[archive(crate = "::hardlight::rkyv")]
+        #[archive(crate = "::hardlight::rkyv", check_bytes)]
+        // #[archive_attr(derive(::hardlight::bytecheck::CheckBytes))]
+        // #[archive_attr(check_bytes(bytecheck_crate = "::hardlight::bytecheck"))]
         #input
     };
 
