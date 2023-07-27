@@ -1,6 +1,6 @@
 [package]
 name = "hardlight"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 description = "A secure, real-time, low-latency binary WebSocket RPC subprotocol. Likely the fastest web-compatible RPC framework ever built."
 authors = ["Azz <azz@valera.co>"]
