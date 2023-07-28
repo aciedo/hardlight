@@ -1,4 +1,4 @@
-use hardlight::*;
+use hardlight::{rpc, connection_state, HandlerResult};
 
 #[rpc]
 pub trait Counter {

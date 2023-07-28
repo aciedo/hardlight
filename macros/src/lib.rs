@@ -21,14 +21,14 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
         #input_ast
 
         #vis struct StateController {
-            state: parking_lot::Mutex<#state_ident>,
-            channel: std::sync::Arc<tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
+            state: ::hardlight::parking_lot::Mutex<#state_ident>,
+            channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
         }
 
         impl StateController {
-            fn new(channel: StateUpdateChannel) -> Self {
+            fn new(channel: ::hardlight::StateUpdateChannel) -> Self {
                 Self {
-                    state: parking_lot::Mutex::new(Default::default()),
+                    state: ::hardlight::parking_lot::Mutex::new(Default::default()),
                     channel: std::sync::Arc::new(channel),
                 }
             }
@@ -44,9 +44,9 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
         }
 
         #vis struct StateGuard<'a> {
-            state: parking_lot::MutexGuard<'a, #state_ident>,
+            state: ::hardlight::parking_lot::MutexGuard<'a, #state_ident>,
             starting_state: #state_ident,
-            channel: std::sync::Arc<tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
+            channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
         }
 
         impl<'a> Drop for StateGuard<'a> {
@@ -59,7 +59,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
                     if self.state.#field_names != self.starting_state.#field_names {
                         changes.push((
                             #field_indices,
-                            rkyv::to_bytes::<_, 1024>(&self.state.#field_names).unwrap().to_vec(),
+                            ::hardlight::rkyv::to_bytes::<_, 1024>(&self.state.#field_names).unwrap().to_vec(),
                         ));
                     }
                 )*
@@ -94,17 +94,17 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
 
-        impl ClientState for State {
+        impl ::hardlight::ClientState for State {
             fn apply_changes(
                 &mut self,
                 changes: Vec<(usize, Vec<u8>)>,
-            ) -> HandlerResult<()> {
+            ) -> ::hardlight::HandlerResult<()> {
                 for (field_index, new_value) in changes {
                     match field_index {
                         #(
                             #field_indices => {
-                                self.#field_names = rkyv::from_bytes(&new_value)
-                                    .map_err(|_| RpcHandlerError::BadInputBytes)?;
+                                self.#field_names = ::hardlight::rkyv::from_bytes(&new_value)
+                                    .map_err(|_| ::hardlight::RpcHandlerError::BadInputBytes)?;
                             }
                         ),*
                         _ => {}
@@ -218,9 +218,8 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
         .collect::<Vec<_>>();
 
     let shared_code = quote! {
-        #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
-        #[archive_attr(derive(::hardlight::bytecheck::CheckBytes))]
-        #[archive(crate = "::hardlight::rkyv")]
+        #[derive(::hardlight::rkyv_derive::Archive, ::hardlight::rkyv_derive::Serialize, ::hardlight::rkyv_derive::Deserialize)]
+        #[archive(crate = "::hardlight::rkyv", check_bytes)]
         #[repr(u8)]
         #vis enum RpcCall {
             #(#rpc_variants),*
@@ -232,14 +231,14 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
 
         quote! {
             #vis struct #server_struct_ident {
-                config: ServerConfig,
-                shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+                config: ::hardlight::ServerConfig,
+                shutdown: Option<::hardlight::tokio::sync::oneshot::Sender<()>>,
                 control_channels: Option<()>,
             }
 
-            #[async_trait::async_trait]
-            impl ApplicationServer for #server_struct_ident {
-                fn new(config: ServerConfig) -> Self {
+            #[::hardlight::async_trait::async_trait]
+            impl ::hardlight::ApplicationServer for #server_struct_ident {
+                fn new(config: ::hardlight::ServerConfig) -> Self {
                     Self {
                         config,
                         shutdown: None,
@@ -248,10 +247,10 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
 
                 async fn start(&mut self) -> Result<(), std::io::Error> {
-                    let server = Server::new(self.config.clone(), Handler::init());
-                    let (error_tx, error_rx) = tokio::sync::oneshot::channel();
-                    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-                    let (control_channels_tx, control_channels_rx) = tokio::sync::oneshot::channel();
+                    let server = ::hardlight::Server::new(self.config.clone(), Handler::init());
+                    let (error_tx, error_rx) = ::hardlight::tokio::sync::oneshot::channel();
+                    let (shutdown_tx, shutdown_rx) = ::hardlight::tokio::sync::oneshot::channel();
+                    let (control_channels_tx, control_channels_rx) = ::hardlight::tokio::sync::oneshot::channel();
 
                     tokio::spawn(async move {
                         if let Err(e) = server.run(shutdown_rx, control_channels_tx).await {
@@ -261,7 +260,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
 
                     tokio::select! {
                         e = error_rx => {
-                            tracing::error!("Server error: {:?}", e);
+                            ::hardlight::tracing::error!("Server error: {:?}", e);
                             return Err(e.unwrap());
                         }
                         control_channels = control_channels_rx => {
@@ -272,7 +271,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                 }
                 fn stop(&mut self) {
-                    tracing::debug!("Telling server to shutdown");
+                    ::hardlight::tracing::debug!("Telling server to shutdown");
                     match self.shutdown.take() {
                         Some(shutdown) => {
                             let _ = shutdown.send(());
@@ -308,7 +307,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     Some(quote! {
                         RpcCall::#variant_ident { #(#inputs),* } => {
                             let result = self.#method_ident(#(#inputs),*).await?;
-                            let result = rkyv::to_bytes::<_, 1024>(&result).unwrap();
+                            let result = ::hardlight::rkyv::to_bytes::<_, 1024>(&result).unwrap();
                             Ok(result.to_vec())
                         }
                     })
@@ -319,6 +318,8 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
             .collect::<Vec<_>>();
 
         quote! {
+            use ::hardlight::ServerHandler;
+            
             /// RPC server that implements the [Counter] trait. A wrapper around
             /// [Server]
             #vis struct Handler {
@@ -329,7 +330,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
             impl Handler {
                 /// An easier way to get the channel factory
                 fn init(
-                ) -> impl Fn(StateUpdateChannel) -> Box<dyn ServerHandler + Send + Sync>
+                ) -> impl Fn(::hardlight::StateUpdateChannel) -> Box<dyn ::hardlight::ServerHandler + Send + Sync>
                        + Send
                        + Sync
                        + 'static
@@ -338,9 +339,9 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             }
 
-            #[async_trait::async_trait]
-            impl ServerHandler for Handler {
-                fn new(state_update_channel: StateUpdateChannel) -> Self {
+            #[::hardlight::async_trait::async_trait]
+            impl ::hardlight::ServerHandler for Handler {
+                fn new(state_update_channel: ::hardlight::StateUpdateChannel) -> Self {
                     Self {
                         state: std::sync::Arc::new(StateController::new(state_update_channel)),
                     }
@@ -349,9 +350,9 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 async fn handle_rpc_call(
                     &self,
                     input: &[u8],
-                ) -> Result<Vec<u8>, RpcHandlerError> {
-                    let call: RpcCall = rkyv::from_bytes(input)
-                        .map_err(|_| RpcHandlerError::BadInputBytes)?;
+                ) -> Result<Vec<u8>, ::hardlight::RpcHandlerError> {
+                    let call: RpcCall = ::hardlight::rkyv::from_bytes(input)
+                        .map_err(|_| ::hardlight::RpcHandlerError::BadInputBytes)?;
 
                     match call {
                         #(#server_methods),*
@@ -390,8 +391,8 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     #(#attr)*
                     async fn #method_ident(#method_inputs) #method_output {
                         match self.make_rpc_call(RpcCall::#rpc_call_variant { #(#rpc_call_params),* }).await {
-                            Ok(c) => rkyv::from_bytes(&c)
-                                .map_err(|_| RpcHandlerError::BadOutputBytes),
+                            Ok(c) => ::hardlight::rkyv::from_bytes(&c)
+                                .map_err(|_| ::hardlight::RpcHandlerError::BadOutputBytes),
                             Err(e) => Err(e),
                         }
                     }
@@ -403,7 +404,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
         
         #[cfg(not(feature = "disable-self-signed"))]
         let client_new = quote! {
-            fn new_self_signed(host: &str, compression: Compression) -> Self {
+            fn new_self_signed(host: &str, compression: ::hardlight::Compression) -> Self {
                 Self {
                     host: host.to_string(),
                     self_signed: true,
@@ -413,7 +414,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             }
 
-            fn new(host: &str, compression: Compression) -> Self {
+            fn new(host: &str, compression: ::hardlight::Compression) -> Self {
                 Self {
                     host: host.to_string(),
                     self_signed: false,
@@ -426,7 +427,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
         
         #[cfg(feature = "disable-self-signed")]
         let client_new = quote! {
-            fn new(host: &str, compression: Compression) -> Self {
+            fn new(host: &str, compression: ::hardlight::Compression) -> Self {
                 Self {
                     host: host.to_string(),
                     self_signed: false,
@@ -438,35 +439,36 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
         };
 
         quote! {
+            use ::hardlight::ApplicationClient;
             // CLIENT CODE
             #vis struct #client_name {
                 host: String,
                 self_signed: bool,
-                shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-                rpc_tx: Option<tokio::sync::mpsc::Sender<(Vec<u8>, RpcResponseSender)>>,
-                compression: Compression,
+                shutdown: Option<::hardlight::tokio::sync::oneshot::Sender<()>>,
+                rpc_tx: Option<::hardlight::tokio::sync::mpsc::Sender<(Vec<u8>, ::hardlight::RpcResponseSender)>>,
+                compression: ::hardlight::Compression,
             }
 
-            #[async_trait::async_trait]
-            impl ApplicationClient for #client_name {
+            #[::hardlight::async_trait::async_trait]
+            impl ::hardlight::ApplicationClient for #client_name {
                 #client_new
 
                 /// Spawns a runtime client in the background to maintain the active
                 /// connection
-                async fn connect(&mut self) -> Result<(), tungstenite::Error> {
-                    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
-                    let (control_channels_tx, control_channels_rx) = tokio::sync::oneshot::channel();
-                    let (error_tx, error_rx) = tokio::sync::oneshot::channel();
+                async fn connect(&mut self) -> Result<(), ::hardlight::tungstenite::Error> {
+                    let (shutdown, shutdown_rx) = ::hardlight::tokio::sync::oneshot::channel();
+                    let (control_channels_tx, control_channels_rx) = ::hardlight::tokio::sync::oneshot::channel();
+                    let (error_tx, error_rx) = ::hardlight::tokio::sync::oneshot::channel();
 
                     let self_signed = self.self_signed;
                     let host = self.host.clone();
                     let compression = self.compression;
 
                     tokio::spawn(async move {
-                        let mut client: Client<State> = if self_signed {
-                            Client::new_self_signed(&host, compression)
+                        let mut client: ::hardlight::Client<State> = if self_signed {
+                            ::hardlight::Client::new_self_signed(&host, compression)
                         } else {
-                            Client::new(&host, compression)
+                            ::hardlight::Client::new(&host, compression)
                         };
 
                         if let Err(e) =
@@ -480,20 +482,20 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                         Ok((rpc_tx,)) = control_channels_rx => {
                             // at this point, the client will NOT return any errors, so we
                             // can safely ignore the error_rx channel
-                            tracing::debug!("Received control channels from client");
+                            ::hardlight::tracing::debug!("Received control channels from client");
                             self.shutdown = Some(shutdown);
                             self.rpc_tx = Some(rpc_tx);
                             Ok(())
                         }
                         e = error_rx => {
-                            tracing::error!("Error received from client: {:?}", e);
+                            ::hardlight::tracing::error!("Error received from client: {:?}", e);
                             Err(e.unwrap())
                         }
                     }
                 }
 
                 fn disconnect(&mut self) {
-                    tracing::debug!("Telling client to shutdown");
+                    ::hardlight::tracing::debug!("Telling client to shutdown");
                     match self.shutdown.take() {
                         Some(shutdown) => {
                             let _ = shutdown.send(());
@@ -504,13 +506,13 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
             }
 
             impl #client_name {
-                async fn make_rpc_call(&self, call: RpcCall) -> HandlerResult<Vec<u8>> {
+                async fn make_rpc_call(&self, call: RpcCall) -> ::hardlight::HandlerResult<Vec<u8>> {
                     if let Some(rpc_chan) = self.rpc_tx.clone() {
-                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let (tx, rx) = ::hardlight::tokio::sync::oneshot::channel();
                         rpc_chan
                             .send((
-                                rkyv::to_bytes::<RpcCall, 1024>(&call)
-                                    .map_err(|_| RpcHandlerError::BadInputBytes)?
+                                ::hardlight::rkyv::to_bytes::<RpcCall, 1024>(&call)
+                                    .map_err(|_| ::hardlight::RpcHandlerError::BadInputBytes)?
                                     .to_vec(),
                                 tx,
                             ))
@@ -518,19 +520,19 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                             .unwrap();
                         rx.await.unwrap()
                     } else {
-                        Err(RpcHandlerError::ClientNotConnected)
+                        Err(::hardlight::RpcHandlerError::ClientNotConnected)
                     }
                 }
             }
 
             impl Drop for #client_name {
                 fn drop(&mut self) {
-                    tracing::debug!("Application client got dropped. Disconnecting.");
+                    ::hardlight::tracing::debug!("Application client got dropped. Disconnecting.");
                     self.disconnect();
                 }
             }
 
-            #[async_trait::async_trait]
+            #[::hardlight::async_trait::async_trait]
             impl #trait_ident for #client_name {
                 #(#client_methods)*
             }
@@ -538,7 +540,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
-        #[async_trait::async_trait]
+        #[::hardlight::async_trait::async_trait]
         #trait_input
         #shared_code
         #application_server
@@ -559,7 +561,7 @@ pub fn rpc_handler(
     let input = parse_macro_input!(item as syn::ItemImpl);
 
     let expanded = quote! {
-        #[async_trait::async_trait]
+        #[::hardlight::async_trait::async_trait]
         #input
     };
 
@@ -579,8 +581,6 @@ pub fn codable(
     let expanded = quote! {
         #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
         #[archive(crate = "::hardlight::rkyv", check_bytes)]
-        // #[archive_attr(derive(::hardlight::bytecheck::CheckBytes))]
-        // #[archive_attr(check_bytes(bytecheck_crate = "::hardlight::bytecheck"))]
         #input
     };
 

@@ -6,10 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-hardlight = { version = "1.0.0", path = "..", features = ["unpure-compression"] }
+hardlight = { version = "1.2.3", path = "..", features = ["unpure-compression"] }
 tokio = { version = "1.27.0", features = ["full"] }
 tracing = "0.1.37"
 tracing-subscriber = "0.3.16"
-rkyv = { version = "0.7.40", features = ["validation", "uuid", "copy"] }
 indicatif = { version = "0.17.5", features = ["tokio"] }
 plotters = "0.3.4"
