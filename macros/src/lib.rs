@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, AttributeArgs, Ident, ItemStruct, ItemTrait};
+use syn::{parse_macro_input, Ident, ItemStruct, ItemTrait};
 
 #[proc_macro_attribute]
 pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
@@ -136,44 +136,11 @@ fn snake_to_pascal_case(s: &str) -> String {
 
 #[proc_macro_attribute]
 pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
-    let _args = parse_macro_input!(args as AttributeArgs);
+    let no_server_handler = args.to_string().contains("no_server_handler");
     let trait_input = parse_macro_input!(input as ItemTrait);
     let vis = &trait_input.vis;
 
     let trait_ident = &trait_input.ident;
-
-    // // rewrite trait input so all outputs are wrapped in HandlerResult
-    // let trait_items = trait_input.clone()
-    //     .items
-    //     .iter()
-    //     .map(|item| {
-    //         if let syn::TraitItem::Method(method) = item {
-    //             let output = &method.sig.output;
-    //             let output = quote! {
-    //                 -> HandlerResult<#output>
-    //             };
-    //             let mut method = method.clone();
-    //             method.sig.output = syn::parse2(output).unwrap();
-    //             syn::TraitItem::Method(method)
-    //         } else {
-    //             item.clone()
-    //         }
-    //     })
-    //     .collect::<Vec<_>>();
-
-    // let trait_input = syn::ItemTrait {
-    //     attrs: trait_input.attrs,
-    //     vis: vis.clone(),
-    //     unsafety: trait_input.unsafety,
-    //     auto_token: trait_input.auto_token,
-    //     trait_token: trait_input.trait_token,
-    //     ident: trait_ident.clone(),
-    //     generics: trait_input.generics,
-    //     colon_token: trait_input.colon_token,
-    //     supertraits: trait_input.supertraits,
-    //     brace_token: trait_input.brace_token,
-    //     items: trait_items,
-    // };
 
     // Generate RpcCall enum variants
     let rpc_variants = trait_input
@@ -226,64 +193,8 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
-    let application_server = {
-        let server_struct_ident = format_ident!("{}Server", trait_ident);
 
-        quote! {
-            #vis struct #server_struct_ident {
-                config: ::hardlight::ServerConfig,
-                shutdown: Option<::hardlight::tokio::sync::oneshot::Sender<()>>,
-                control_channels: Option<()>,
-            }
-
-            #[::hardlight::async_trait::async_trait]
-            impl ::hardlight::ApplicationServer for #server_struct_ident {
-                fn new(config: ::hardlight::ServerConfig) -> Self {
-                    Self {
-                        config,
-                        shutdown: None,
-                        control_channels: None,
-                    }
-                }
-
-                async fn start(&mut self) -> Result<(), std::io::Error> {
-                    let server = ::hardlight::Server::new(self.config.clone(), Handler::init());
-                    let (error_tx, error_rx) = ::hardlight::tokio::sync::oneshot::channel();
-                    let (shutdown_tx, shutdown_rx) = ::hardlight::tokio::sync::oneshot::channel();
-                    let (control_channels_tx, control_channels_rx) = ::hardlight::tokio::sync::oneshot::channel();
-
-                    tokio::spawn(async move {
-                        if let Err(e) = server.run(shutdown_rx, control_channels_tx).await {
-                            error_tx.send(e).unwrap()
-                        };
-                    });
-
-                    tokio::select! {
-                        e = error_rx => {
-                            ::hardlight::tracing::error!("Server error: {:?}", e);
-                            return Err(e.unwrap());
-                        }
-                        control_channels = control_channels_rx => {
-                            self.control_channels = Some(control_channels.unwrap());
-                            self.shutdown = Some(shutdown_tx);
-                            Ok(())
-                        }
-                    }
-                }
-                fn stop(&mut self) {
-                    ::hardlight::tracing::debug!("Telling server to shutdown");
-                    match self.shutdown.take() {
-                        Some(shutdown) => {
-                            let _ = shutdown.send(());
-                        }
-                        None => {}
-                    }
-                }
-            }
-        }
-    };
-
-    let server_handler = {
+    let server_handler = if !no_server_handler { 
         let server_methods = trait_input
             .items
             .iter()
@@ -320,23 +231,9 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             use ::hardlight::ServerHandler;
             
-            /// RPC server that implements the [Counter] trait. A wrapper around
-            /// [Server]
             #vis struct Handler {
                 // the runtime will provide the state when it creates the handler
                 #vis state: std::sync::Arc<StateController>,
-            }
-
-            impl Handler {
-                /// An easier way to get the channel factory
-                fn init(
-                ) -> impl Fn(::hardlight::StateUpdateChannel) -> Box<dyn ::hardlight::ServerHandler + Send + Sync>
-                       + Send
-                       + Sync
-                       + 'static
-                       + Copy {
-                    |state_update_channel| Box::new(Self::new(state_update_channel))
-                }
             }
 
             #[::hardlight::async_trait::async_trait]
@@ -360,6 +257,8 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             }
         }
+    } else {
+        quote! {}
     };
 
     let application_client = {
@@ -543,7 +442,6 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
         #[::hardlight::async_trait::async_trait]
         #trait_input
         #shared_code
-        #application_server
         #server_handler
         #application_client
     };

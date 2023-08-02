@@ -6,8 +6,8 @@ use hardlight::*;
 async fn main() {
     tracing_subscriber::fmt::init();
     let config = ServerConfig::new_self_signed("localhost:8080");
-    let mut server = TodoServer::new(config);
-    server.start().await.unwrap();
+    let server = Server::new(config, factory!(Handler));
+    tokio::spawn(async move { server.run().await.unwrap()});
 
     let mut client =
         TodoClient::new_self_signed("localhost:8080", Compression::default());
@@ -48,7 +48,6 @@ async fn main() {
     print_tasks(&client).await;
 
     client.disconnect();
-    server.stop();
 }
 
 async fn print_tasks(client: &TodoClient) {

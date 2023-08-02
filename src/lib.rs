@@ -73,3 +73,19 @@ pub(crate) fn deflate(msg: &[u8], level: Compression) -> Option<Vec<u8>> {
     );
     out
 }
+
+#[macro_export]
+/// A macro to create a factory function for a handler.
+/// Example:
+/// ```rust
+/// factory!(Handler)
+/// ```
+/// expands to
+/// ```rust
+/// |state_update_channel| Box::new(Handler::new(state_update_channel))
+/// ```
+macro_rules! factory {
+    ($handler:ty) => {
+        |state_update_channel| Box::new(<$handler>::new(state_update_channel))
+    };
+}

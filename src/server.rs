@@ -6,7 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
-    sync::{broadcast, mpsc, oneshot},
+    sync::mpsc,
 };
 
 #[cfg(not(feature = "disable-self-signed"))]
@@ -130,31 +130,15 @@ where
         }
     }
 
-    pub async fn run(
-        &self,
-        mut shutdown: oneshot::Receiver<()>,
-        control_channels_tx: oneshot::Sender<()>,
-    ) -> io::Result<()> {
+    pub async fn run(&self) -> io::Result<()> {
         info!("Booting HL server v{}...", HL_VERSION);
         let acceptor = TlsAcceptor::from(Arc::new(self.config.tls.clone()));
         let listener = TcpListener::bind(&self.config.address).await?;
         info!("Listening on {} with TLS", self.config.address);
 
-        // oneshot: 1 sender, 1 receiver
-        // mpsc: many senders, 1 receiver
-        // broadcast: many senders, many receivers
-        let (shutdown_tx, _) = broadcast::channel(1);
-        control_channels_tx.send(()).unwrap();
         loop {
-            select! {
-                _ = &mut shutdown => {
-                    info!("Shutting down server");
-                    if let Err(e) = shutdown_tx.send(()) {
-                        warn!("Failed to send shutdown signal: {}", e);
-                    };
-                    return Ok(());
-                }
-                Ok((stream, peer_addr)) = listener.accept() => self.handle_connection(stream, acceptor.clone(), peer_addr, broadcast::Sender::subscribe(&shutdown_tx))
+            if let Ok((stream, peer_addr)) = listener.accept().await {
+                self.handle_connection(stream, acceptor.clone(), peer_addr);
             }
         }
     }
@@ -164,7 +148,6 @@ where
         stream: TcpStream,
         acceptor: TlsAcceptor,
         peer_addr: SocketAddr,
-        mut shutdown: broadcast::Receiver<()>,
     ) {
         let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
         let handler = (self.factory)(state_change_tx);
@@ -361,11 +344,6 @@ where
                                     continue
                                 }
                             };
-                        }
-                        // await shutdown signal
-                        _ = shutdown.recv() => {
-                            debug!("Received shutdown signal. Closing connection...");
-                            return;
                         }
                     }
                 }
