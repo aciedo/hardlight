@@ -4,8 +4,8 @@ use hardlight::*;
 async fn main() {
     tracing_subscriber::fmt::init();
     let config = ServerConfig::new_self_signed("localhost:8080");
-    let mut server = PetServiceServer::new(config);
-    server.start().await.unwrap();
+    let server = Server::new(config, factory!(Handler));
+    tokio::spawn(async move { server.run().await.unwrap()});
 
     let mut client = PetServiceClient::new_self_signed(
         "localhost:8080",

@@ -4,9 +4,8 @@ use hardlight::*;
 async fn main() {
     tracing_subscriber::fmt::init();
     let config = ServerConfig::new_self_signed("localhost:8080");
-    let mut server = CounterServer::new(config);
-    server.start().await.unwrap();
-    loop {} // server runs in background by default
+    let server = Server::new(config, factory!(Handler));
+    server.run().await.unwrap();
 }
 
 /// These RPC methods are executed on the server and can be called by clients.

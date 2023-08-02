@@ -1,4 +1,4 @@
-use hardlight::{ServerConfig, ApplicationServer, Compression, ApplicationClient};
+use hardlight::{ServerConfig, Compression, ApplicationClient, Server, factory, ServerHandler};
 use indicatif::{ProgressBar, ProgressStyle};
 use plotters::prelude::*;
 use std::sync::Arc;
@@ -8,10 +8,10 @@ use tokio::{
 };
 use tracing::info;
 
-use crate::service::{Counter, CounterClient, CounterServer};
-
 mod handler;
 mod service;
+
+use service::{Handler, Counter, CounterClient};
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -19,18 +19,18 @@ async fn main() -> Result<(), std::io::Error> {
 
     let config = ServerConfig::new_self_signed("localhost:8080");
     info!("{:?}", config);
-    let mut server = CounterServer::new(config);
-    server.start().await.unwrap();
+    let server = Server::new(config, factory!(Handler));
+    tokio::spawn(async move { server.run().await.unwrap() });
 
     // wait for the server to start
     sleep(Duration::from_millis(10)).await;
     
-    let num_clients = 10;
-    let tasks_per_client = 2;
-    let invocs_per_task = 25_000;
-    let compression = Compression::best();
+    let num_clients = 1;
+    let tasks_per_client = 1;
+    let invocs_per_task = 250_000;
+    let compression = Compression::none();
     info!(
-        "Running {} clients, {} tasks per client, {} invocations per task",
+        "Running {} clients, {} tasks per client, {} invocations per task\n",
         num_clients, tasks_per_client, invocs_per_task
     );
 
@@ -68,9 +68,9 @@ async fn main() -> Result<(), std::io::Error> {
     let bar = ProgressBar::new(num_clients as u64 * tasks_per_client as u64 * invocs_per_task as u64)
         .with_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} {per_sec} ({eta}) {msg}")
+                .template("{spinner:.blue} [{elapsed_precise}] ({eta}) {bar:50.green/blue} {pos:>7}/{len:7} {per_sec} {msg}")
                 .unwrap()
-                .progress_chars("#>-")
+                .progress_chars("█░⎯")
         );
 
     loop {
@@ -83,7 +83,7 @@ async fn main() -> Result<(), std::io::Error> {
         };
     }
 
-    bar.finish_with_message("done");
+    bar.finish_with_message("done\n");
 
     plot_line_graph(&timings);
 
@@ -92,14 +92,16 @@ async fn main() -> Result<(), std::io::Error> {
     let avg = sum / timings.len() as u128;
     let min = timings.first().unwrap().as_micros();
     let max = timings.last().unwrap().as_micros();
-    let median = timings[timings.len() / 2].as_micros();
+    let med = timings[timings.len() / 2].as_micros();
+    let std_dev = timings
+        .iter()
+        .map(|t| (t.as_micros() as i128 - avg as i128).pow(2) as u128)
+        .sum::<u128>()
+        / timings.len() as u128;
 
     plot_percentile_graph(&timings);
 
-    info!(
-        "Average: {}us, Min: {}us, Max: {}us, Median: {}us",
-        avg, min, max, median
-    );
+    info!("(µs) med:{med}; avg:{avg}; std_dev:{std_dev}; min:{min}; max:{max}");
 
     Ok(())
 }
