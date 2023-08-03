@@ -21,30 +21,34 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
         #input_ast
 
         #vis struct StateController {
-            state: ::hardlight::parking_lot::Mutex<#state_ident>,
+            state: ::hardlight::tokio::sync::RwLock<#state_ident>,
             channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
         }
 
         impl StateController {
-            fn new(channel: ::hardlight::StateUpdateChannel) -> Self {
+            #vis fn new(channel: ::hardlight::StateUpdateChannel) -> Self {
                 Self {
-                    state: ::hardlight::parking_lot::Mutex::new(Default::default()),
+                    state: ::hardlight::tokio::sync::RwLock::new(Default::default()),
                     channel: std::sync::Arc::new(channel),
                 }
             }
 
-            #vis fn lock(&self) -> StateGuard {
-                let state = self.state.lock();
+            #vis async fn write(&self) -> StateGuard {
+                let state = self.state.write().await;
                 StateGuard {
                     starting_state: state.clone(),
                     state,
                     channel: self.channel.clone(),
                 }
             }
+
+            #vis async fn read(&self) -> ::hardlight::tokio::sync::RwLockReadGuard<'_, #state_ident> {
+                self.state.read().await
+            }
         }
 
         #vis struct StateGuard<'a> {
-            state: ::hardlight::parking_lot::MutexGuard<'a, #state_ident>,
+            state: ::hardlight::tokio::sync::RwLockWriteGuard<'a, #state_ident>,
             starting_state: #state_ident,
             channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
         }
@@ -193,8 +197,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
-
-    let server_handler = if !no_server_handler { 
+    let server_handler = if !no_server_handler {
         let server_methods = trait_input
             .items
             .iter()
@@ -230,7 +233,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
 
         quote! {
             use ::hardlight::ServerHandler;
-            
+
             #vis struct Handler {
                 // the runtime will provide the state when it creates the handler
                 #vis state: std::sync::Arc<StateController>,
@@ -300,7 +303,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 client_methods.push(client_method);
             }
         }
-        
+
         #[cfg(not(feature = "disable-self-signed"))]
         let client_new = quote! {
             fn new_self_signed(host: &str, compression: ::hardlight::Compression) -> Self {
@@ -309,6 +312,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     self_signed: true,
                     shutdown: None,
                     rpc_tx: None,
+                    state: None,
                     compression,
                 }
             }
@@ -319,11 +323,12 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     self_signed: false,
                     shutdown: None,
                     rpc_tx: None,
+                    state: None,
                     compression,
                 }
             }
         };
-        
+
         #[cfg(feature = "disable-self-signed")]
         let client_new = quote! {
             fn new(host: &str, compression: ::hardlight::Compression) -> Self {
@@ -332,6 +337,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     self_signed: false,
                     shutdown: None,
                     rpc_tx: None,
+                    state: None,
                     compression,
                 }
             }
@@ -345,11 +351,13 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 self_signed: bool,
                 shutdown: Option<::hardlight::tokio::sync::oneshot::Sender<()>>,
                 rpc_tx: Option<::hardlight::tokio::sync::mpsc::Sender<(Vec<u8>, ::hardlight::RpcResponseSender)>>,
+                state: Option<std::sync::Arc<::hardlight::tokio::sync::RwLock<State>>>,
                 compression: ::hardlight::Compression,
             }
 
             #[::hardlight::async_trait::async_trait]
             impl ::hardlight::ApplicationClient for #client_name {
+                type State = State;
                 #client_new
 
                 /// Spawns a runtime client in the background to maintain the active
@@ -378,18 +386,29 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     });
 
                     tokio::select! {
-                        Ok((rpc_tx,)) = control_channels_rx => {
+                        Ok((rpc_tx, state)) = control_channels_rx => {
                             // at this point, the client will NOT return any errors, so we
                             // can safely ignore the error_rx channel
                             ::hardlight::tracing::debug!("Received control channels from client");
                             self.shutdown = Some(shutdown);
                             self.rpc_tx = Some(rpc_tx);
+                            self.state = Some(state);
                             Ok(())
                         }
                         e = error_rx => {
                             ::hardlight::tracing::error!("Error received from client: {:?}", e);
                             Err(e.unwrap())
                         }
+                    }
+                }
+
+                /// Returns a RwLockReadGuard to the state of the client.
+                /// Do NOT hold this lock for long periods of time, as it will block processing.
+                /// It is designed to be used for short periods of time, such as logging or a brief check/clone.
+                async fn state(&self) -> ::hardlight::HandlerResult<::hardlight::tokio::sync::RwLockReadGuard<'_, Self::State>> {
+                    match &self.state {
+                        Some(state) => Ok(state.read().await),
+                        None => Err(::hardlight::RpcHandlerError::ClientNotConnected),
                     }
                 }
 
@@ -468,8 +487,8 @@ pub fn rpc_handler(
 
 #[proc_macro_attribute]
 /// Takes any ast as an input and annotates it with useful attributes for data
-/// serialization and deserialization. This consists of `Archive + Serialize + Deserialize`,
-/// for the root type and `CheckBytes` for the archived version.
+/// serialization and deserialization. This consists of `Archive + Serialize +
+/// Deserialize`, for the root type and `CheckBytes` for the archived version.
 pub fn codable(
     _attr: proc_macro::TokenStream,
     item: proc_macro::TokenStream,

@@ -1,13 +1,13 @@
 use hardlight::*;
 
-use crate::service::Handler;
+use super::Handler;
 
 pub async fn decrement(
     connection: &Handler,
     amount: u32,
 ) -> HandlerResult<u32> {
     // lock the state to the current thread
-    let mut state = connection.state.lock();
+    let mut state = connection.state.write().await;
     state.counter -= amount;
     Ok(state.counter)
 }

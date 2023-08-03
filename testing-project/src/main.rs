@@ -1,4 +1,7 @@
-use hardlight::{ServerConfig, Compression, ApplicationClient, Server, factory, ServerHandler};
+use hardlight::{
+    factory, ApplicationClient, Compression, Server, ServerConfig,
+    ServerHandler,
+};
 use indicatif::{ProgressBar, ProgressStyle};
 use plotters::prelude::*;
 use std::sync::Arc;
@@ -11,7 +14,8 @@ use tracing::info;
 mod handler;
 mod service;
 
-use service::{Handler, Counter, CounterClient};
+use handler::Handler;
+use service::{Counter, CounterClient};
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -24,10 +28,10 @@ async fn main() -> Result<(), std::io::Error> {
 
     // wait for the server to start
     sleep(Duration::from_millis(10)).await;
-    
+
     let num_clients = 1;
     let tasks_per_client = 1;
-    let invocs_per_task = 250_000;
+    let invocs_per_task = 150_000;
     let compression = Compression::none();
     info!(
         "Running {} clients, {} tasks per client, {} invocations per task\n",
@@ -39,10 +43,8 @@ async fn main() -> Result<(), std::io::Error> {
     for _ in 0..num_clients {
         let sender = send.clone();
         tokio::spawn(async move {
-            let mut client = CounterClient::new_self_signed(
-                "localhost:8080",
-                compression,
-            );
+            let mut client =
+                CounterClient::new_self_signed("localhost:8080", compression);
             client.connect().await.unwrap();
             let client = Arc::new(client);
             let mut tasks = Vec::new();
@@ -74,7 +76,11 @@ async fn main() -> Result<(), std::io::Error> {
         );
 
     loop {
-        match timeout(Duration::from_millis(10), recv.recv()).await.ok().flatten() {
+        match timeout(Duration::from_millis(10), recv.recv())
+            .await
+            .ok()
+            .flatten()
+        {
             Some(elapsed) => {
                 timings.push(elapsed);
                 bar.inc(1);

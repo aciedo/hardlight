@@ -10,14 +10,11 @@ use tokio::{
 };
 
 #[cfg(not(feature = "disable-self-signed"))]
-use tokio_rustls::rustls::{Certificate, PrivateKey};
-#[cfg(not(feature = "disable-self-signed"))]
 use rcgen::generate_simple_self_signed;
+#[cfg(not(feature = "disable-self-signed"))]
+use tokio_rustls::rustls::{Certificate, PrivateKey};
 
-use tokio_rustls::{
-    rustls::ServerConfig as TLSServerConfig,
-    TlsAcceptor,
-};
+use tokio_rustls::{rustls::ServerConfig as TLSServerConfig, TlsAcceptor};
 use tokio_tungstenite::{
     accept_hdr_async,
     tungstenite::{
@@ -49,14 +46,7 @@ pub trait ServerHandler {
     where
         Self: Sized;
     /// Handle an RPC call (method + arguments) from the client.
-    async fn handle_rpc_call(
-        &self,
-        input: &[u8],
-    ) -> Result<Vec<u8>, RpcHandlerError>;
-    // An easy way to get the handler factory.
-    // Currently disabled because we can't use impl Trait in traits yet. (https://github.com/rust-lang/rust/issues/91611)
-    // fn init() -> impl Fn(StateUpdateChannel) -> Box<dyn Handler + Send +
-    // Sync> + Send + Sync + 'static + Copy;
+    async fn handle_rpc_call(&self, input: &[u8]) -> HandlerResult<Vec<u8>>;
 }
 
 #[async_trait]
