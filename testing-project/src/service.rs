@@ -1,12 +1,12 @@
-use hardlight::{rpc, connection_state, HandlerResult};
+use hardlight::{connection_state, rpc, HandlerResult};
 
-#[rpc]
+#[rpc(no_server_handler)]
 pub trait Counter {
     async fn increment(&self, amount: u32) -> HandlerResult<u32>;
     async fn decrement(&self, amount: u32) -> HandlerResult<u32>;
-    // We'll deprecate this at some point as we can just send it using Events
+    /// We'll deprecate this at some point as we can just send it using Events
     async fn get(&self) -> HandlerResult<u32>;
-    // A simple function that does nothing and returns nothing
+    /// A simple function that does nothing and returns nothing
     async fn test_overhead(&self) -> HandlerResult<()>;
 }
 

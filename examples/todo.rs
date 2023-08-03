@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 
 use hardlight::*;
+use tracing::info;
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
     let config = ServerConfig::new_self_signed("localhost:8080");
     let server = Server::new(config, factory!(Handler));
-    tokio::spawn(async move { server.run().await.unwrap()});
+    tokio::spawn(async move { server.run().await.unwrap() });
 
     let mut client =
         TodoClient::new_self_signed("localhost:8080", Compression::default());
@@ -27,7 +28,7 @@ async fn main() {
     for task in tasks_to_create {
         client.create(task).await.unwrap();
     }
-    println!("Created {} tasks in {:?}", len, start.elapsed());
+    info!("Created {} tasks in {:?}", len, start.elapsed());
 
     let task_id = client.create(Task::new("Buy cheese")).await.unwrap();
 
@@ -114,7 +115,7 @@ struct State {
 #[rpc_handler]
 impl Todo for Handler {
     async fn create(&self, task: Task) -> HandlerResult<u32> {
-        let mut state = self.state.lock();
+        let mut state = self.state.write().await;
         let id = state.next_id;
         state.next_id += 1;
         state.tasks.insert(id, task);
@@ -122,7 +123,7 @@ impl Todo for Handler {
         Ok(id)
     }
     async fn mark_as_done(&self, ids: Vec<u32>) -> HandlerResult<()> {
-        let mut state = self.state.lock();
+        let mut state = self.state.write().await;
         for id in ids {
             if let Some(task) = state.tasks.get_mut(&id) {
                 task.status = TaskStatus::Done;
@@ -131,7 +132,7 @@ impl Todo for Handler {
         Ok(())
     }
     async fn get(&self, ids: Vec<u32>) -> HandlerResult<HashMap<u32, Task>> {
-        let state = self.state.lock();
+        let state = self.state.read().await;
         let mut tasks = HashMap::new();
         for id in ids {
             if let Some(task) = state.tasks.get(&id) {
@@ -141,23 +142,23 @@ impl Todo for Handler {
         Ok(tasks)
     }
     async fn get_all(&self) -> HandlerResult<HashMap<u32, Task>> {
-        let state = self.state.lock();
+        let state = self.state.read().await;
         Ok(state.tasks.clone())
     }
     async fn delete(&self, ids: Vec<u32>) -> HandlerResult<()> {
-        let mut state = self.state.lock();
+        let mut state = self.state.write().await;
         for id in ids {
             state.tasks.remove(&id);
         }
         Ok(())
     }
     async fn delete_all(&self) -> HandlerResult<()> {
-        let mut state = self.state.lock();
+        let mut state = self.state.write().await;
         state.tasks.clear();
         Ok(())
     }
     async fn delete_done_tasks(&self) -> HandlerResult<()> {
-        let mut state = self.state.lock();
+        let mut state = self.state.write().await;
         let mut ids = Vec::new();
         for (id, task) in state.tasks.iter() {
             if let TaskStatus::Done = task.status {

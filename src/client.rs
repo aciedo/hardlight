@@ -6,7 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use rustls_native_certs::load_native_certs;
 use tokio::{
     select,
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, RwLock, RwLockReadGuard},
 };
 use tokio_rustls::rustls::{
     client::{ServerCertVerified, ServerCertVerifier},
@@ -49,9 +49,11 @@ pub trait ClientState {
 
 #[async_trait]
 pub trait ApplicationClient {
+    type State;
     #[cfg(not(feature = "disable-self-signed"))]
     fn new_self_signed(host: &str, compression: Compression) -> Self;
     fn new(host: &str, compression: Compression) -> Self;
+    async fn state(&self) -> HandlerResult<RwLockReadGuard<'_, Self::State>>;
     async fn connect(&mut self) -> Result<(), tungstenite::Error>;
     fn disconnect(&mut self);
 }
@@ -62,12 +64,19 @@ pub trait ApplicationClient {
 /// The application will await the response on the receiver side of the channel.
 pub type RpcResponseSender = oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>;
 
+pub type ControlChannels<T> = (
+    // rpc sender - app can send multiple RPC requests consisting of:
+    // (serialized RPC call (includes method + args), RPC's response sender)
+    mpsc::Sender<(Vec<u8>, RpcResponseSender)>,
+    Arc<RwLock<T>>,
+);
+
 pub struct Client<T>
 where
     T: ClientState + Default + Debug,
 {
     config: ClientConfig,
-    state: T,
+    state: Arc<RwLock<T>>,
     hl_version_string: HeaderValue,
 }
 
@@ -114,7 +123,7 @@ where
         let version = Version::from_str(HL_VERSION).unwrap();
         Self {
             config,
-            state: T::default().into(),
+            state: Arc::new(T::default().into()),
             hl_version_string: format!("hl/{}", version.major).parse().unwrap(),
         }
     }
@@ -125,14 +134,7 @@ where
         mut shutdown: oneshot::Receiver<()>,
         // Sends control channels to the application so it can send RPC calls,
         // events, and other things to the server.
-        control_channels_tx: oneshot::Sender<(
-            // rpc sender - app can send multiple RPC requests consisting of:
-            //            <-----> serialized RPC call (includes method + args)
-            //                     <--------------->
-            //                     client will send the RPC's response on this
-            // channel
-            mpsc::Sender<(Vec<u8>, RpcResponseSender)>,
-        )>,
+        control_channels_tx: oneshot::Sender<ControlChannels<T>>,
     ) -> Result<(), Error> {
         let connection_span =
             span!(Level::DEBUG, "connection", host = self.config.host);
@@ -175,8 +177,10 @@ where
             }
 
             debug!("Sending control channels to application...");
-            let (rpc_tx, mut rpc_rx) = mpsc::channel(10);
-            control_channels_tx.send((rpc_tx,)).unwrap();
+            let (rpc_request_tx, mut rpc_request_rx) = mpsc::channel(10);
+            if let Err(_) = control_channels_tx.send((rpc_request_tx, self.state.clone())) {
+                panic!("Failed to send control channels to application");
+            }
             debug!("Control channels sent.");
 
             // keep track of active RPC calls
@@ -186,7 +190,7 @@ where
             loop {
                 select! {
                     // await RPC requests from the application
-                    Some((internal, completion_tx)) = rpc_rx.recv() => {
+                    Some((internal, completion_tx)) = rpc_request_rx.recv() => {
                         debug!("Received RPC request from application");
                         // find a free rpc id
                         if let Some(id) = active_rpc_calls.iter().position(|x| x.is_none()) {
@@ -273,7 +277,7 @@ where
                                         let span = span!(Level::DEBUG, "state_change");
                                         let _enter = span.enter();
                                         debug!("Received {} state change(s) from server", changes.len());
-                                        if let Err(e) = self.state.apply_changes(changes) {
+                                        if let Err(e) = self.state.write().await.apply_changes(changes) {
                                             warn!("Failed to apply state changes. Error: {:?}", e);
                                         };
                                     }

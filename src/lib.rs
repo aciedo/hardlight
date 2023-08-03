@@ -11,9 +11,19 @@ use flate2::write::{
     DeflateDecoder as Decompressor, DeflateEncoder as Compressor,
 };
 pub use flate2::Compression;
+use futures_util::Future;
 pub use hardlight_macros::*;
 pub use parking_lot;
 pub use rkyv;
+use rkyv::{
+    de::deserializers::SharedDeserializeMap,
+    ser::serializers::{
+        AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch,
+        HeapScratch, SharedSerializeMap,
+    },
+    validation::validators::DefaultValidator,
+    AlignedVec, Archive, CheckBytes, Deserialize, Serialize,
+};
 pub use rkyv_derive;
 pub use server::*;
 pub use tokio;
@@ -77,15 +87,43 @@ pub(crate) fn deflate(msg: &[u8], level: Compression) -> Option<Vec<u8>> {
 #[macro_export]
 /// A macro to create a factory function for a handler.
 /// Example:
-/// ```rust
+/// ```
 /// factory!(Handler)
 /// ```
 /// expands to
-/// ```rust
+/// ```
 /// |state_update_channel| Box::new(Handler::new(state_update_channel))
 /// ```
 macro_rules! factory {
     ($handler:ty) => {
         |state_update_channel| Box::new(<$handler>::new(state_update_channel))
     };
+}
+
+/// Awaits a future and serializes the result. This is a helper function for
+/// implementing [ServerHandler::handle_rpc_call].
+pub async fn handle<F, O>(f: F) -> HandlerResult<Vec<u8>>
+where
+    F: Future<Output = O>,
+    O: Serialize<
+        CompositeSerializer<
+            AlignedSerializer<AlignedVec>,
+            FallbackScratch<HeapScratch<1024>, AllocScratch>,
+            SharedSerializeMap,
+        >,
+    >,
+{
+    let result = f.await;
+    let result = rkyv::to_bytes::<_, 1024>(&result).unwrap();
+    Ok(result.to_vec())
+}
+
+/// Deserializes a slice of bytes into a type that implements [Archive].
+pub fn deserialize<'a, T>(bytes: &'a [u8]) -> HandlerResult<T>
+where
+    T: rkyv::Archive,
+    <T as Archive>::Archived: for<'b> CheckBytes<DefaultValidator<'b>>
+        + Deserialize<T, SharedDeserializeMap>,
+{
+    rkyv::from_bytes::<T>(bytes).map_err(|_| RpcHandlerError::BadInputBytes)
 }

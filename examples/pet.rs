@@ -1,11 +1,12 @@
 use hardlight::*;
+use tracing::info;
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
     let config = ServerConfig::new_self_signed("localhost:8080");
     let server = Server::new(config, factory!(Handler));
-    tokio::spawn(async move { server.run().await.unwrap()});
+    tokio::spawn(async move { server.run().await.unwrap() });
 
     let mut client = PetServiceClient::new_self_signed(
         "localhost:8080",
@@ -17,19 +18,15 @@ async fn main() {
         .become_dog("Rex".to_string(), 3, "German Shepherd".to_string())
         .await
         .unwrap();
-    println!(
-        "Rex says: {}",
-        client.make_a_noise().await.unwrap().unwrap()
-    );
+    info!("{:?}", client.state().await.unwrap());
+    info!("{}", client.make_a_noise().await.unwrap().unwrap());
 
     client
         .become_cat("Mittens".to_string(), 2, "Tabby".to_string())
         .await
         .unwrap();
-    println!(
-        "Mittens says: {}",
-        client.make_a_noise().await.unwrap().unwrap()
-    );
+    info!("{:?}", client.state().await.unwrap());
+    info!("{}", client.make_a_noise().await.unwrap().unwrap());
 }
 
 #[rpc]
@@ -49,6 +46,26 @@ trait PetService {
     async fn make_a_noise(&self) -> HandlerResult<Option<String>>;
 }
 
+#[connection_state]
+struct State {
+    pet: Option<Pet>,
+}
+
+#[codable]
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum Pet {
+    Dog {
+        name: String,
+        age: u8,
+        breed: String,
+    },
+    Cat {
+        name: String,
+        age: u8,
+        breed: String,
+    },
+}
+
 #[rpc_handler]
 impl PetService for Handler {
     async fn become_dog(
@@ -57,8 +74,8 @@ impl PetService for Handler {
         age: u8,
         breed: String,
     ) -> HandlerResult<()> {
-        let mut state = self.state.lock();
-        state.pet = Some(Pet::Dog(Dog::new(name, age, breed)));
+        let mut state = self.state.write().await;
+        state.pet = Some(Pet::Dog { name, age, breed });
         Ok(())
     }
 
@@ -68,65 +85,21 @@ impl PetService for Handler {
         age: u8,
         breed: String,
     ) -> HandlerResult<()> {
-        let mut state = self.state.lock();
-        state.pet = Some(Pet::Cat(Cat::new(name, age, breed)));
+        let mut state = self.state.write().await;
+        state.pet = Some(Pet::Cat { name, age, breed });
         Ok(())
     }
 
     async fn make_a_noise(&self) -> HandlerResult<Option<String>> {
-        let state = self.state.lock();
+        let state = self.state.read().await;
         match &state.pet {
-            Some(Pet::Dog(dog)) => Ok(Some(dog.bark())),
-            Some(Pet::Cat(cat)) => Ok(Some(cat.meow())),
+            Some(Pet::Dog { name, .. }) => {
+                Ok(Some(format!("{} says woof!", name)))
+            }
+            Some(Pet::Cat { name, .. }) => {
+                Ok(Some(format!("{} says meow!", name)))
+            }
             None => Ok(None),
         }
-    }
-}
-
-#[connection_state]
-struct State {
-    pet: Option<Pet>,
-}
-
-#[codable]
-#[derive(Debug, PartialEq, Eq, Clone)]
-enum Pet {
-    Dog(Dog),
-    Cat(Cat),
-}
-
-#[codable]
-#[derive(Debug, PartialEq, Eq, Clone)]
-struct Dog {
-    name: String,
-    age: u8,
-    breed: String,
-}
-
-impl Dog {
-    fn new(name: String, age: u8, breed: String) -> Self {
-        Self { name, age, breed }
-    }
-
-    fn bark(&self) -> String {
-        "woof!".to_owned()
-    }
-}
-
-#[codable]
-#[derive(Debug, PartialEq, Eq, Clone)]
-struct Cat {
-    name: String,
-    age: u8,
-    breed: String,
-}
-
-impl Cat {
-    fn new(name: String, age: u8, breed: String) -> Self {
-        Self { name, age, breed }
-    }
-
-    fn meow(&self) -> String {
-        "meow!".to_owned()
     }
 }
