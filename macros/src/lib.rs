@@ -396,7 +396,6 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                             Ok(())
                         }
                         e = error_rx => {
-                            ::hardlight::tracing::error!("Error received from client: {:?}", e);
                             Err(e.unwrap())
                         }
                     }
