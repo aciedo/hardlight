@@ -23,7 +23,7 @@ use tokio_tungstenite::{
         Message,
     },
 };
-use tracing::{debug, info, span, warn, Instrument, Level};
+use tracing::{debug, info, span, warn, Instrument, Level, trace};
 use version::{version, Version};
 
 use crate::{
@@ -152,7 +152,7 @@ where
                     Err(_) => return,
                 };
 
-                debug!("Successfully terminated TLS handshake");
+                trace!("Successfully terminated TLS handshake");
 
                 let mut compression = Compression::default();
 
@@ -160,7 +160,7 @@ where
                     match req.headers().get("Sec-WebSocket-Protocol") {
                         Some(req_version) if req_version == &version => {
                             response.headers_mut().append("Sec-WebSocket-Protocol", version);
-                            debug!("Received valid handshake, upgrading connection to HardLight ({})", req_version.to_str().unwrap());
+                            trace!("Received valid handshake, upgrading connection to HardLight ({})", req_version.to_str().unwrap());
                         }
                         Some(req_version) => {
                             *response.status_mut() = StatusCode::BAD_REQUEST;
@@ -179,7 +179,7 @@ where
                         .and_then(|c| c.parse::<u8>().ok())
                         .filter(|&c| c <= 9)
                         .map(|c| {
-                            debug!("Accepted client specified compression level {}", c);
+                            trace!("Accepted client specified compression level {}", c);
                             Compression::new(c as u32)
                         })
                         .unwrap_or(Compression::default());
@@ -197,7 +197,7 @@ where
                     }
                 };
 
-                debug!("Connection fully established");
+                trace!("Connection fully established");
 
                 // keep track of active RPC calls
                 let mut in_flight = [false; u8::MAX as usize + 1];
@@ -208,7 +208,7 @@ where
 
                 let compression = Arc::new(compression);
 
-                debug!("Starting RPC handler loop");
+                trace!("Starting RPC handler loop");
                 loop {
                     select! {
                         // await new messages from the client
@@ -247,7 +247,7 @@ where
                                             continue;
                                         }
 
-                                        debug!("Received call from client. Spawning handler task...");
+                                        trace!("Received call from client. Spawning handler task...");
 
                                         let tx = rpc_tx.clone();
                                         let handler = handler.clone();
@@ -261,7 +261,7 @@ where
                                             ).await
                                         });
 
-                                        debug!("Handler task spawned.");
+                                        trace!("Handler task spawned.");
                                     }
                                 }
                             }
@@ -278,7 +278,7 @@ where
 
                             in_flight[id as usize] = false;
 
-                            debug!("RPC call finished. Serializing and sending response...");
+                            trace!("RPC call finished. Serializing and sending response...");
 
                             let encoded = match rkyv::to_bytes::<ServerMessage, 1024>(&msg) {
                                 Ok(encoded) => encoded,
@@ -297,7 +297,7 @@ where
                             };
 
                             match ws_stream.send(Message::Binary(binary)).await {
-                                Ok(_) => debug!("Response sent."),
+                                Ok(_) => trace!("Response sent."),
                                 Err(e) => {
                                     warn!("Error sending response to client: {}", e);
                                     continue
@@ -328,7 +328,7 @@ where
                             };
 
                             match ws_stream.send(Message::Binary(binary)).await {
-                                Ok(_) => debug!("State update sent."),
+                                Ok(_) => trace!("State update sent."),
                                 Err(e) => {
                                     warn!("Error sending state update to client: {}", e);
                                     continue

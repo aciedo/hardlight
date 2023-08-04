@@ -1,6 +1,6 @@
 [package]
 name = "hardlight"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
 description = "A secure, real-time, low-latency binary WebSocket RPC subprotocol. Likely the fastest web-compatible RPC framework ever built."
 authors = ["Azz <azz@valera.co>"]
@@ -40,7 +40,7 @@ doctest = false
 # environments
 unpure-compression = ["flate2/zlib-ng"]
 # disables most tracing in release mode
-quiet = ["tracing/release_max_level_info"]
+quiet = ["tracing/release_max_level_debug"]
 # enables all tracing 
 noisy = ["tracing/max_level_trace"]
 # disables any self-signed features, forcing the use of a CA

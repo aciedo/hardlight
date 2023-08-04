@@ -30,7 +30,7 @@ pub use tokio;
 pub use tokio_macros;
 pub use tokio_tungstenite::tungstenite;
 pub use tracing;
-use tracing::debug;
+use tracing::trace;
 pub use wire::*;
 
 #[derive(Eq, PartialEq, Hash, Clone, Debug)]
@@ -64,7 +64,7 @@ pub(crate) fn inflate(msg: &[u8]) -> Option<Vec<u8>> {
     let mut decompressor = Decompressor::new(vec![]);
     decompressor.write_all(msg).ok()?;
     let out = decompressor.finish().ok();
-    debug!(
+    trace!(
         "Inflate: {} bytes -> {} bytes",
         msg.len(),
         out.as_ref().map(|v| v.len()).unwrap_or(0)
@@ -76,7 +76,7 @@ pub(crate) fn deflate(msg: &[u8], level: Compression) -> Option<Vec<u8>> {
     let mut compressor = Compressor::new(vec![], level);
     compressor.write_all(msg).ok()?;
     let out = compressor.finish().ok();
-    debug!(
+    trace!(
         "Deflate: {} bytes -> {} bytes",
         msg.len(),
         out.as_ref().map(|v| v.len()).unwrap_or(0)

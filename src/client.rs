@@ -23,7 +23,7 @@ use tokio_tungstenite::{
     },
     Connector,
 };
-use tracing::{debug, error, span, warn, Instrument, Level};
+use tracing::{debug, error, span, warn, Instrument, Level, trace};
 use version::Version;
 
 use crate::{
@@ -157,7 +157,7 @@ where
                         .filter(|&c| c <= 9)
                         .map(|c| Compression::new(c));
 
-                    debug!(
+                    trace!(
                         "HardLight connection established [{}, compression {}]",
                         protocol.to_str().unwrap(),
                         match compression {
@@ -176,12 +176,12 @@ where
                 }
             }
 
-            debug!("Sending control channels to application...");
+            trace!("Sending control channels to application...");
             let (rpc_request_tx, mut rpc_request_rx) = mpsc::channel(10);
             if let Err(_) = control_channels_tx.send((rpc_request_tx, self.state.clone())) {
                 panic!("Failed to send control channels to application");
             }
-            debug!("Control channels sent.");
+            trace!("Control channels sent.");
 
             // keep track of active RPC calls
             let mut active_rpc_calls: [Option<RpcResponseSender>; 256] = array_init(|_| None);
@@ -191,12 +191,12 @@ where
                 select! {
                     // await RPC requests from the application
                     Some((internal, completion_tx)) = rpc_request_rx.recv() => {
-                        debug!("Received RPC request from application");
+                        trace!("Received RPC request from application");
                         // find a free rpc id
                         if let Some(id) = active_rpc_calls.iter().position(|x| x.is_none()) {
                             let span = span!(Level::DEBUG, "rpc", id = id);
                             let _enter = span.enter();
-                            debug!("Found free RPC id");
+                            trace!("Found free RPC id");
 
                             let msg = ClientMessage::RPCRequest {
                                 id: id as u8,
@@ -223,7 +223,7 @@ where
                                 }
                             };
 
-                            debug!("Sending RPC call to server");
+                            trace!("Sending RPC call to server");
 
                             match stream.send(Message::Binary(binary)).await {
                                 Ok(_) => (),
@@ -235,7 +235,7 @@ where
                                 }
                             }
 
-                            debug!("RPC call sent to server");
+                            trace!("RPC call sent to server");
 
                             active_rpc_calls[id] = Some(completion_tx);
                         } else {
@@ -265,9 +265,9 @@ where
                                     ServerMessage::RPCResponse { id, output } => {
                                         let span = span!(Level::DEBUG, "rpc", id = %id);
                                         let _enter = span.enter();
-                                        debug!("Received RPC response from server");
+                                        trace!("Received RPC response from server");
                                         if let Some(completion_tx) = active_rpc_calls[id as usize].take() {
-                                            debug!("Attempting send to application");
+                                            trace!("Attempting send to application");
                                             let _ = completion_tx.send(output);
                                         } else {
                                             warn!("Received RPC response for unknown RPC call. Ignoring.");
@@ -276,7 +276,7 @@ where
                                     ServerMessage::StateChange(changes) => {
                                         let span = span!(Level::DEBUG, "state_change");
                                         let _enter = span.enter();
-                                        debug!("Received {} state change(s) from server", changes.len());
+                                        trace!("Received {} state change(s) from server", changes.len());
                                         if let Err(e) = self.state.write().await.apply_changes(changes) {
                                             warn!("Failed to apply state changes. Error: {:?}", e);
                                         };

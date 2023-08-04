@@ -1,5 +1,4 @@
 mod decrement;
-mod get;
 mod increment;
 
 use std::sync::Arc;
@@ -7,7 +6,7 @@ use std::sync::Arc;
 use crate::service::*;
 use hardlight::*;
 
-use self::{decrement::*, get::*, increment::*};
+use self::{decrement::*, increment::*};
 
 pub struct Handler {
     // the runtime will provide the state when it creates the handler
