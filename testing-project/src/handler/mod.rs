@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::service::*;
 use hardlight::*;
+use tokio::task::yield_now;
 
 use self::{decrement::*, increment::*};
 
@@ -56,7 +57,8 @@ impl ServerHandler for Handler {
     }
     
     /// Emits an event to the event switch
-    fn emit(&self, event: Event) {
+    async fn emit(&self, event: Event) {
         self.event_tx.send(event).unwrap();
+        yield_now().await;
     }
 }

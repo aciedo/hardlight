@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use hardlight::*;
 use hardlight::{tokio::sync::mpsc::UnboundedSender, Event, ProxiedSubscriptionNotification};
+use tokio::task::yield_now;
 
 #[rpc(no_server_handler)]
 pub trait Counter {
@@ -63,8 +64,9 @@ impl ServerHandler for Handler {
     }
     
     /// Emits an event to the event switch
-    fn emit(&self, event: Event) {
+    async fn emit(&self, event: Event) {
         self.event_tx.send(event).unwrap();
+        yield_now().await;
     }
 }
 
