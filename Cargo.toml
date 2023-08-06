@@ -13,7 +13,6 @@ repository = "https://github.com/valeralabs/hardlight"
 async-trait = "0.1.68"
 tokio = { version = "1.27.0", features = ["full"] }
 tokio-tungstenite = { version = "0.18.0", features = ["rustls-tls-native-roots"] }
-rkyv = { version = "0.7.40", features = ["validation", "uuid", "copy"] }
 bytecheck = { version = "0.6.9", features = ["uuid"] }
 version = "3.0.0"
 tokio-rustls = { version = "0.23.4", default-features = false, features = ["dangerous_configuration"] }
@@ -28,6 +27,7 @@ parking_lot = "0.12.1"
 rkyv_derive = { version = "0.7.40", features = ["copy"] }
 hashbrown = { version = "0.14.0", features = ["rkyv"] }
 rand = "0.8.5"
+rkyv = { version = "0.7.42", features = ["copy", "validation"] }
 
 [dependencies.flate2]
 version = "1.0.17"

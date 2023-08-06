@@ -1,3 +1,4 @@
+
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 
 use crate::{Topic, StateUpdate};

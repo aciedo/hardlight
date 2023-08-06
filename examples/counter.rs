@@ -19,22 +19,12 @@ async fn main() {
         while let Ok(event) = subscription.recv().await {
             let (topic, event): (Topic, CounterEvent) = (event.topic, event.payload.into());
             info!("Received event on topic {:?}: {:?}", topic, event);
-            // print duration it took to get from server to client
-            match event {
-                CounterEvent::Incremented { at, .. } => {
-                    let elapsed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH + at).unwrap();
-                    info!("Duration: {:?}", elapsed);
-                }
-                CounterEvent::Decremented { at, .. } => {
-                    let elapsed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH + at).unwrap();
-                    info!("Duration: {:?}", elapsed);
-                }
-            }
         }
     });
     client.new_counter().await.unwrap();
-    client.increment(5).await.unwrap();
-    client.decrement(2).await.unwrap();
+    for _ in 0..100 {
+        client.increment(1).await.unwrap();
+    }
     info!("Counter: {}", client.get().await.unwrap());
     info!("{:?}", client.state().await.unwrap());
 }
@@ -45,12 +35,10 @@ enum CounterEvent {
     Incremented {
         to: u32,
         from: u32,
-        at: Duration,
     },
     Decremented {
         to: u32,
         from: u32,
-        at: Duration,
     },
 }
 
@@ -84,11 +72,9 @@ impl Counter for Handler {
         let event = CounterEvent::Incremented {
             to: state.counter + amount,
             from: state.counter,
-            // at is since the unix epoch in nanoseconds
-            at: get_at(),
         };
         state.counter += amount;
-        self.emit(Event::new(state.topic.clone(), event.into()));
+        self.emit(Event::new(state.topic.clone(), event.into())).await;
         Ok(())
     }
 
@@ -97,10 +83,9 @@ impl Counter for Handler {
         let event = CounterEvent::Decremented {
             to: state.counter - amount,
             from: state.counter,
-            at: get_at(),
         };
         state.counter -= amount;
-        self.emit(Event::new(state.topic.clone(), event.into()));
+        self.emit(Event::new(state.topic.clone(), event.into())).await;
         Ok(())
     }
 
@@ -108,10 +93,4 @@ impl Counter for Handler {
         let state = self.state.read().await;
         Ok(state.counter)
     }
-}
-
-fn get_at() -> Duration {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
 }

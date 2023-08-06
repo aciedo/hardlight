@@ -80,7 +80,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
                     // this could fail if the server shuts down before these
                     // changes are sent... but we're not too worried about that
                     let _ = channel.send(changes).await;
-                    ::hardlight::tokio::task::yield_now().await;
+                    // ::hardlight::tokio::task::yield_now().await;
                 });
             }
         }
@@ -279,8 +279,9 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 
                 /// Emits an event to the event switch
-                fn emit(&self, event: ::hardlight::Event) {
+                async fn emit(&self, event: ::hardlight::Event) {
                     self.event_tx.send(event).unwrap();
+                    ::tokio::task::yield_now().await;
                 }
             }
         }

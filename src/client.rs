@@ -1,4 +1,4 @@
-use std::{fmt::Debug, str::FromStr, sync::Arc, time::SystemTime};
+use std::{fmt::Debug, str::FromStr, sync::Arc, time::{SystemTime, Instant}};
 
 use async_trait::async_trait;
 use flate2::Compression;
@@ -6,7 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use rustls_native_certs::load_native_certs;
 use tokio::{
     select,
-    sync::{mpsc, oneshot, RwLock, RwLockReadGuard, broadcast}, task::yield_now,
+    sync::{mpsc, oneshot, RwLock, RwLockReadGuard, broadcast},
 };
 use tokio_rustls::rustls::{
     client::{ServerCertVerified, ServerCertVerifier},
@@ -214,7 +214,7 @@ where
                                     warn!("Failed to serialize RPC call. Ignoring. Error: {e}");
                                     // we don't care if the receiver has dropped
                                     let _ = completion_tx.send(Err(RpcHandlerError::BadInputBytes));
-                                    yield_now().await;
+                                    // yield_now().await;
                                     continue
                                 }
                             };
@@ -225,7 +225,7 @@ where
                                     warn!("Failed to compress RPC call. Ignoring.");
                                     // we don't care if the receiver has dropped
                                     let _ = completion_tx.send(Err(RpcHandlerError::BadInputBytes));
-                                    yield_now().await;
+                                    // yield_now().await;
                                     continue
                                 }
                             };
@@ -238,7 +238,7 @@ where
                                     warn!("Failed to send RPC call. Ignoring. Error: {e}");
                                     // we don't care if the receiver has dropped
                                     let _ = completion_tx.send(Err(RpcHandlerError::ClientNotConnected));
-                                    yield_now().await;
+                                    // yield_now().await;
                                     continue
                                 }
                             }
@@ -249,7 +249,7 @@ where
                         } else {
                             warn!("No free RPC id available. Responding with an error.");
                             let _ = completion_tx.send(Err(RpcHandlerError::TooManyCallsInFlight));
-                            yield_now().await;
+                            // yield_now().await;
                         }
                     }
                     // await RPC responses from the server
@@ -278,7 +278,7 @@ where
                                         if let Some(completion_tx) = active_rpc_calls[id as usize].take() {
                                             trace!("Attempting send to application");
                                             let _ = completion_tx.send(output);
-                                            yield_now().await;
+                                            // yield_now().await;
                                         } else {
                                             warn!("Received RPC response for unknown RPC call. Ignoring.");
                                         }
@@ -291,12 +291,12 @@ where
                                             warn!("Failed to apply state changes. Error: {:?}", e);
                                         };
                                     }
-                                    ServerMessage::NewEvent { topic, payload } => {
-                                        let event = Event { topic, payload };
+                                    ServerMessage::NewEvent { topic, payload, .. } => {
+                                        let event = Event { topic, payload, created_at: Instant::now() };
                                         if let Err(e) = self.events_tx.send(event) {
                                             warn!("Failed to send event to application. Error: {:?}", e);
                                         }
-                                        yield_now().await;
+                                        // yield_now().await;
                                     }
                                 }
                             }

@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr, str::{FromStr, Utf8Error}, sync::Arc};
+use std::{io, net::SocketAddr, str::{FromStr, Utf8Error}, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use flate2::Compression;
@@ -26,7 +26,7 @@ use tokio_tungstenite::{
         Message,
     }, WebSocketStream,
 };
-use tracing::{debug, info, span, warn, Instrument, Level, trace};
+use tracing::{debug, info, span, warn, Instrument, Level, trace, info_span};
 use version::{version, Version};
 
 use crate::{
@@ -68,7 +68,7 @@ pub trait ServerHandler {
     /// Unsubscribes a connection from a topic
     fn unsubscribe(&self, topic: Topic);
     /// Emits an event to the event switch
-    fn emit(&self, event: Event);
+    async fn emit(&self, event: Event);
 }
 
 #[async_trait]
@@ -169,12 +169,12 @@ where
         // handlers can subscribe to event topics here
         let (subscription_notification_tx, subscription_notification_rx) = mpsc::unbounded_channel::<SubscriptionNotification>();
         
-        let event_switch = EventSwitch::new(subscription_notification_rx, self.event_rx.clone());
-        tokio::spawn(event_switch.run());
+        let event_switch = EventSwitch::new(self.event_rx.clone(), subscription_notification_rx);
+        tokio::spawn(event_switch.run().instrument(info_span!("event_switch")));
 
         loop {
             if let Ok((stream, peer_addr)) = listener.accept().await {
-                self.handle_connection(stream, acceptor.clone(), peer_addr, subscription_notification_tx.clone());
+                self.handle_connection(stream, acceptor.clone(), peer_addr, subscription_notification_tx.clone(), self.event_tx.clone());
             }
         }
     }
@@ -185,11 +185,11 @@ where
         acceptor: TlsAcceptor,
         peer_addr: SocketAddr,
         subscription_notification_tx: mpsc::UnboundedSender<SubscriptionNotification>,
+        events_switch_tx: mpsc::UnboundedSender<Event>
     ) {
         let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
         let (proxy_subscription_notification_tx, mut proxy_subscription_notification_rx) = mpsc::unbounded_channel::<ProxiedSubscriptionNotification>();
-        let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Event>();
-        let handler = (self.factory)(state_change_tx, proxy_subscription_notification_tx, events_tx.clone());
+        let handler = (self.factory)(state_change_tx, proxy_subscription_notification_tx, events_switch_tx);
         let version: HeaderValue = self.hl_version_string.clone();
         tokio::spawn(async move {
             let connection_span =
@@ -254,6 +254,7 @@ where
                 let (rpc_tx, mut rpc_rx) = mpsc::channel(u8::MAX as usize + 1);
                 
                 let mut subscriptions: HashMap<Topic, SubscriptionID> = HashMap::new();
+                let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Event>();
 
                 let handler = Arc::new(handler);
 
@@ -378,9 +379,9 @@ where
                             let span = span!(Level::DEBUG, "event");
                             let _enter = span.enter();
 
-                            debug!("Received event from application. Serializing and sending...");
+                            debug!("Received event from application after {:?}. Serializing and sending...", event.created_at.elapsed());
                             
-                            let Event { topic, payload } = event;
+                            let Event { topic, payload, .. } = event;
                             Server::<T>::send_msg(
                                 ServerMessage::NewEvent { topic, payload }, 
                                 &mut ws_stream, compression.clone(), "Event"
@@ -483,30 +484,31 @@ pub enum ProxiedSubscriptionNotification {
 pub struct Event {
     pub topic: Topic,
     pub payload: Vec<u8>,
+    pub created_at: Instant
 }
 
 impl Event {
-    pub fn new(topic: Topic, payload: Vec<u8>) -> Self { Self { topic, payload } }
+    pub fn new(topic: Topic, payload: Vec<u8>) -> Self { Self { topic, payload, created_at: Instant::now() } }
 }
 
 /// The event switch is responsible for routing events from the application to the subscribed connections.
 pub struct EventSwitch {
+    new_event_rx: Arc<Mutex<mpsc::UnboundedReceiver<Event>>>,
     /// A map of topic -> connections
-    subscriptions: HashMap<Topic, HashMap<SubscriptionID, Vec<mpsc::UnboundedSender<Event>>>>,
+    subscriptions: HashMap<Topic, HashMap<SubscriptionID, mpsc::UnboundedSender<Event>>>,
     /// Handlers notify the event switch about new subscriptions
     subscription_notification_rx: mpsc::UnboundedReceiver<SubscriptionNotification>,
-    new_event_rx: Arc<Mutex<mpsc::UnboundedReceiver<Event>>>,
 }
 
 impl EventSwitch {
     fn new(
-        new_subscription_rx: mpsc::UnboundedReceiver<SubscriptionNotification>,
         new_event_rx: Arc<Mutex<mpsc::UnboundedReceiver<Event>>>,
+        subscription_notification_rx: mpsc::UnboundedReceiver<SubscriptionNotification>
     ) -> Self {
         Self {
-            subscriptions: HashMap::new(),
-            subscription_notification_rx: new_subscription_rx,
             new_event_rx,
+            subscriptions: HashMap::new(),
+            subscription_notification_rx,
         }
     }
     
@@ -515,29 +517,44 @@ impl EventSwitch {
         loop {
             select! {
                 Some(notification) = self.subscription_notification_rx.recv() => {
-                    match notification {
-                        SubscriptionNotification::Subscribe { topic, id, tx } => {
-                            let subscribers = self.subscriptions.entry(topic).or_insert_with(HashMap::new);
-                            let connections = subscribers.entry(id).or_insert_with(Vec::new);
-                            connections.push(tx);
-                        }
-                        SubscriptionNotification::Unsubscribe { topic, id } => {
-                            if let Some(subscribers) = self.subscriptions.get_mut(&topic) {
-                                subscribers.remove(&id);
+                        trace!("Received subscription notification from handler");
+                        match notification {
+                            SubscriptionNotification::Subscribe { topic, id, tx } => {
+                                trace!("Subscription notification is a subscribe");
+                                if let Some(subscribers) = self.subscriptions.get_mut(&topic) {
+                                    trace!("Topic already exists, adding subscriber");
+                                    subscribers.insert(id, tx);
+                                } else {
+                                    trace!("Topic does not exist, creating topic and adding subscriber");
+                                    let mut subscribers = HashMap::new();
+                                    subscribers.insert(id, tx);
+                                    self.subscriptions.insert(topic, subscribers);
+                                }
+                            }
+                            SubscriptionNotification::Unsubscribe { topic, id } => {
+                                trace!("Subscription notification is an unsubscribe");
+                                if let Some(subscribers) = self.subscriptions.get_mut(&topic) {
+                                    trace!("Topic exists, removing subscriber");
+                                    subscribers.remove(&id);
+                                } else {
+                                    trace!("Topic does not exist, ignoring unsubscribe");
+                                }
                             }
                         }
                     }
-                }
-                Some(event) = new_event_rx.recv() => {
-                    if let Some(subscribers) = self.subscriptions.get(&event.topic) {
-                        for (_, connections) in subscribers {
-                            for tx in connections {
-                                tx.send(event.clone()).unwrap();
+                    Some(event) = new_event_rx.recv() => {
+                        trace!("Received event from application after {:?}", event.created_at.elapsed());
+                        if let Some(subscribers) = self.subscriptions.get(&event.topic) {
+                            trace!("Topic exists, sending event to {} subscribers", subscribers.len());
+                            for (_, connection) in subscribers {
+                                connection.send(event.clone()).unwrap();
                             }
+                        } else {
+                            trace!("Topic has no subscribers, ignoring event");
                         }
+                        trace!("Finished routing event in {:?}", event.created_at.elapsed());
+                        yield_now().await;
                     }
-                    yield_now().await;
-                }
             }
         }
     }
