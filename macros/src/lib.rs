@@ -529,11 +529,29 @@ pub fn codable(
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     let input = parse_macro_input!(item as syn::Item);
+    
+    let name = match &input {
+        syn::Item::Struct(s) => &s.ident,
+        syn::Item::Enum(e) => &e.ident,
+        _ => panic!("Only structs and enums can be codable"),
+    };
 
     let expanded = quote! {
         #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
         #[archive(crate = "::hardlight::rkyv", check_bytes)]
         #input
+        
+        impl ::std::convert::Into<Vec<u8>> for #name {
+            fn into(self) -> Vec<u8> {
+                ::hardlight::rkyv::to_bytes::<_, 1024>(&self).unwrap().into_vec()
+            }
+        }
+
+        impl ::std::convert::From<Vec<u8>> for #name {
+            fn from(bytes: Vec<u8>) -> Self {
+                ::hardlight::rkyv::from_bytes(&bytes).unwrap()
+            }
+        }
     };
 
     proc_macro::TokenStream::from(expanded)

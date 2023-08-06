@@ -426,7 +426,7 @@ where
     }
 }
 
-#[derive(Eq, PartialEq, Hash, Clone, Debug, Archive, Serialize, Deserialize)]
+#[derive(Eq, PartialEq, Hash, Clone, Debug, Default, Archive, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub struct Topic(Vec<u8>);
 
