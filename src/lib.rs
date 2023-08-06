@@ -33,33 +33,6 @@ pub use tracing;
 use tracing::trace;
 pub use wire::*;
 
-#[derive(Eq, PartialEq, Hash, Clone, Debug)]
-pub struct Topic(Vec<u8>);
-
-impl Into<Vec<u8>> for Topic {
-    fn into(self) -> Vec<u8> {
-        self.0
-    }
-}
-
-impl Into<Topic> for Vec<u8> {
-    fn into(self) -> Topic {
-        Topic(self)
-    }
-}
-
-impl Into<Topic> for &str {
-    fn into(self) -> Topic {
-        Topic(self.as_bytes().to_vec())
-    }
-}
-
-impl Into<Topic> for String {
-    fn into(self) -> Topic {
-        Topic(self.as_bytes().to_vec())
-    }
-}
-
 pub(crate) fn inflate(msg: &[u8]) -> Option<Vec<u8>> {
     let mut decompressor = Decompressor::new(vec![]);
     decompressor.write_all(msg).ok()?;
@@ -92,11 +65,11 @@ pub(crate) fn deflate(msg: &[u8], level: Compression) -> Option<Vec<u8>> {
 /// ```
 /// expands to
 /// ```
-/// |state_update_channel| Box::new(Handler::new(state_update_channel))
+/// |suc, nstx| Box::new(Handler::new(suc, nstx))
 /// ```
 macro_rules! factory {
     ($handler:ty) => {
-        |state_update_channel| Box::new(<$handler>::new(state_update_channel))
+        |suc, nstx, etx| Box::new(<$handler>::new(suc, nstx, etx))
     };
 }
 

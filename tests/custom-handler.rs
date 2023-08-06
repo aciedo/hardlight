@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use hardlight::*;
+use hardlight::{tokio::sync::mpsc::UnboundedSender, Event, ProxiedSubscriptionNotification};
 
 #[rpc(no_server_handler)]
 pub trait Counter {
@@ -20,13 +21,21 @@ pub struct State {
 pub struct Handler {
     // the runtime will provide the state when it creates the handler
     pub state: Arc<StateController>,
+    subscription_notification_tx: UnboundedSender<ProxiedSubscriptionNotification>,
+    event_tx: UnboundedSender<Event>
 }
 
 #[rpc_handler]
 impl ServerHandler for Handler {
-    fn new(state_update_channel: StateUpdateChannel) -> Self {
+    fn new(
+        suc: StateUpdateChannel, 
+        sntx: UnboundedSender<ProxiedSubscriptionNotification>,
+        etx: UnboundedSender<Event>
+    ) -> Self {
         Self {
-            state: Arc::new(StateController::new(state_update_channel)),
+            state: Arc::new(StateController::new(suc)),
+            subscription_notification_tx: sntx,
+            event_tx: etx
         }
     }
 
@@ -41,6 +50,21 @@ impl ServerHandler for Handler {
             RpcCall::Get {} => handle(get(self)).await,
             RpcCall::TestOverhead {} => Ok(vec![]),
         }
+    }
+    
+    /// Subscribes the connection to the given topic
+    fn subscribe(&self, topic: Topic) {
+        self.subscription_notification_tx.send(ProxiedSubscriptionNotification::Subscribe(topic)).unwrap();
+    }
+    
+    /// Unsubscribes the connection from the given topic
+    fn unsubscribe(&self, topic: Topic) {
+        self.subscription_notification_tx.send(ProxiedSubscriptionNotification::Unsubscribe(topic)).unwrap();
+    }
+    
+    /// Emits an event to the event switch
+    fn emit(&self, event: Event) {
+        self.event_tx.send(event).unwrap();
     }
 }
 

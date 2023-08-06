@@ -43,6 +43,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_counter() {
+        tracing_subscriber::fmt::init();
         let config = ServerConfig::new_self_signed("localhost:8080"); // use a different port for testing
         let server = Server::new(config.clone(), factory!(Handler));
         tokio::spawn(async move {

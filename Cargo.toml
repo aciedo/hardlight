@@ -1,6 +1,6 @@
 [package]
 name = "hardlight"
-version = "1.4.2"
+version = "2.0.0"
 edition = "2021"
 description = "A secure, real-time, low-latency binary WebSocket RPC subprotocol. Likely the fastest web-compatible RPC framework ever built."
 authors = ["Azz <azz@valera.co>"]
@@ -21,11 +21,13 @@ rcgen = { version = "0.10.0", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tracing = "0.1.37"
 rustls-native-certs = "0.6.2"
-hardlight-macros = { path = "macros", version = "1.4.1" }
+hardlight-macros = { path = "macros", version = "2.0.0" }
 array-init = "2.0"
 tokio-macros = "2.0.0"
 parking_lot = "0.12.1"
 rkyv_derive = { version = "0.7.40", features = ["copy"] }
+hashbrown = { version = "0.14.0", features = ["rkyv"] }
+rand = "0.8.5"
 
 [dependencies.flate2]
 version = "1.0.17"

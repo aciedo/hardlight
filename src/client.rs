@@ -6,7 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use rustls_native_certs::load_native_certs;
 use tokio::{
     select,
-    sync::{mpsc, oneshot, RwLock, RwLockReadGuard},
+    sync::{mpsc, oneshot, RwLock, RwLockReadGuard, broadcast}, task::yield_now,
 };
 use tokio_rustls::rustls::{
     client::{ServerCertVerified, ServerCertVerifier},
@@ -29,7 +29,7 @@ use version::Version;
 use crate::{
     deflate, inflate,
     server::{HandlerResult, HL_VERSION},
-    wire::{ClientMessage, RpcHandlerError, ServerMessage},
+    wire::{ClientMessage, RpcHandlerError, ServerMessage}, StateUpdate, Event,
 };
 
 use array_init::array_init;
@@ -43,7 +43,7 @@ pub struct ClientConfig {
 pub trait ClientState {
     fn apply_changes(
         &mut self,
-        changes: Vec<(usize, Vec<u8>)>,
+        changes: Vec<StateUpdate>,
     ) -> HandlerResult<()>;
 }
 
@@ -54,6 +54,7 @@ pub trait ApplicationClient {
     fn new_self_signed(host: &str, compression: Compression) -> Self;
     fn new(host: &str, compression: Compression) -> Self;
     async fn state(&self) -> HandlerResult<RwLockReadGuard<'_, Self::State>>;
+    async fn subscribe(&self) -> HandlerResult<broadcast::Receiver<Event>>;
     async fn connect(&mut self) -> Result<(), tungstenite::Error>;
     fn disconnect(&mut self);
 }
@@ -69,6 +70,7 @@ pub type ControlChannels<T> = (
     // (serialized RPC call (includes method + args), RPC's response sender)
     mpsc::Sender<(Vec<u8>, RpcResponseSender)>,
     Arc<RwLock<T>>,
+    Arc<broadcast::Sender<Event>>,
 );
 
 pub struct Client<T>
@@ -78,6 +80,7 @@ where
     config: ClientConfig,
     state: Arc<RwLock<T>>,
     hl_version_string: HeaderValue,
+    events_tx: Arc<broadcast::Sender<Event>>,
 }
 
 impl<T> Client<T>
@@ -121,10 +124,12 @@ where
     /// Create a new client using the given configuration.
     fn new_with_config(config: ClientConfig) -> Self {
         let version = Version::from_str(HL_VERSION).unwrap();
+        let events_tx = Arc::new(broadcast::channel(32).0);
         Self {
             config,
             state: Arc::new(T::default().into()),
             hl_version_string: format!("hl/{}", version.major).parse().unwrap(),
+            events_tx,
         }
     }
 
@@ -178,7 +183,7 @@ where
 
             trace!("Sending control channels to application...");
             let (rpc_request_tx, mut rpc_request_rx) = mpsc::channel(10);
-            if let Err(_) = control_channels_tx.send((rpc_request_tx, self.state.clone())) {
+            if let Err(_) = control_channels_tx.send((rpc_request_tx, self.state.clone(), self.events_tx.clone())) {
                 panic!("Failed to send control channels to application");
             }
             trace!("Control channels sent.");
@@ -203,34 +208,37 @@ where
                                 internal
                             };
 
-                            let mut binary = match rkyv::to_bytes::<ClientMessage, 1024>(&msg) {
+                            let msg = match rkyv::to_bytes::<ClientMessage, 1024>(&msg) {
                                 Ok(bytes) => bytes,
                                 Err(e) => {
                                     warn!("Failed to serialize RPC call. Ignoring. Error: {e}");
                                     // we don't care if the receiver has dropped
                                     let _ = completion_tx.send(Err(RpcHandlerError::BadInputBytes));
+                                    yield_now().await;
                                     continue
                                 }
-                            }.to_vec();
+                            };
 
-                            binary = match deflate(&binary, self.config.compression) {
-                                Some(bytes) => bytes,
+                            let msg = match deflate(msg.as_ref(), self.config.compression) {
+                                Some(msg) => msg,
                                 None => {
                                     warn!("Failed to compress RPC call. Ignoring.");
                                     // we don't care if the receiver has dropped
                                     let _ = completion_tx.send(Err(RpcHandlerError::BadInputBytes));
+                                    yield_now().await;
                                     continue
                                 }
                             };
 
                             trace!("Sending RPC call to server");
 
-                            match stream.send(Message::Binary(binary)).await {
+                            match stream.send(Message::Binary(msg.into())).await {
                                 Ok(_) => (),
                                 Err(e) => {
                                     warn!("Failed to send RPC call. Ignoring. Error: {e}");
                                     // we don't care if the receiver has dropped
                                     let _ = completion_tx.send(Err(RpcHandlerError::ClientNotConnected));
+                                    yield_now().await;
                                     continue
                                 }
                             }
@@ -241,6 +249,7 @@ where
                         } else {
                             warn!("No free RPC id available. Responding with an error.");
                             let _ = completion_tx.send(Err(RpcHandlerError::TooManyCallsInFlight));
+                            yield_now().await;
                         }
                     }
                     // await RPC responses from the server
@@ -269,6 +278,7 @@ where
                                         if let Some(completion_tx) = active_rpc_calls[id as usize].take() {
                                             trace!("Attempting send to application");
                                             let _ = completion_tx.send(output);
+                                            yield_now().await;
                                         } else {
                                             warn!("Received RPC response for unknown RPC call. Ignoring.");
                                         }
@@ -281,8 +291,12 @@ where
                                             warn!("Failed to apply state changes. Error: {:?}", e);
                                         };
                                     }
-                                    ServerMessage::NewEvent { .. } => {
-                                        warn!("NewEvent has not been implemented yet. Ignoring.")
+                                    ServerMessage::NewEvent { topic, payload } => {
+                                        let event = Event { topic, payload };
+                                        if let Err(e) = self.events_tx.send(event) {
+                                            warn!("Failed to send event to application. Error: {:?}", e);
+                                        }
+                                        yield_now().await;
                                     }
                                 }
                             }
@@ -307,6 +321,10 @@ where
         }
         .instrument(connection_span)
         .await
+    }
+    
+    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+        self.events_tx.subscribe()
     }
 }
 
