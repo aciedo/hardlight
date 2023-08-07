@@ -1,7 +1,6 @@
-
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 
-use crate::{Topic, StateUpdate};
+use crate::{StateUpdate, Topic};
 
 #[derive(Archive, Serialize, Deserialize)]
 #[archive_attr(derive(CheckBytes))]

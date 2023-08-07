@@ -1,15 +1,22 @@
-use std::{io, net::SocketAddr, str::{FromStr, Utf8Error}, sync::Arc, time::Instant};
+use std::{
+    io,
+    net::SocketAddr,
+    str::{FromStr, Utf8Error},
+    sync::Arc,
+    time::Instant,
+};
 
 use async_trait::async_trait;
 use flate2::Compression;
 use futures_util::{SinkExt, StreamExt};
 use hashbrown::HashMap;
 use rand::RngCore;
-use rkyv::{Archive, Serialize, Deserialize};
+use rkyv::{Archive, Deserialize, Serialize};
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
-    sync::{mpsc, Mutex}, task::yield_now,
+    sync::mpsc,
+    task::yield_now,
 };
 
 #[cfg(not(feature = "disable-self-signed"))]
@@ -17,16 +24,19 @@ use rcgen::generate_simple_self_signed;
 #[cfg(not(feature = "disable-self-signed"))]
 use tokio_rustls::rustls::{Certificate, PrivateKey};
 
-use tokio_rustls::{rustls::ServerConfig as TLSServerConfig, TlsAcceptor, server::TlsStream};
+use tokio_rustls::{
+    rustls::ServerConfig as TLSServerConfig, server::TlsStream, TlsAcceptor,
+};
 use tokio_tungstenite::{
     accept_hdr_async,
     tungstenite::{
         handshake::server::{Request, Response},
         http::{HeaderValue, StatusCode},
         Message,
-    }, WebSocketStream,
+    },
+    WebSocketStream,
 };
-use tracing::{debug, info, span, warn, Instrument, Level, trace, info_span};
+use tracing::{debug, info, info_span, span, trace, warn, Instrument, Level};
 use version::{version, Version};
 
 use crate::{
@@ -53,22 +63,16 @@ pub type HandlerResult<T> = Result<T, RpcHandlerError>;
 pub trait ServerHandler {
     /// Create a new handler.
     fn new(
-        suc: StateUpdateChannel, 
-        // subscription notification tx (handler -> connection handler)
-        sntx: mpsc::UnboundedSender<ProxiedSubscriptionNotification>,
-        // event tx (handler -> event switch)
-        etx: mpsc::UnboundedSender<Event>
+        suc: StateUpdateChannel,
+        // subscription manager (handler -> connection handler)
+        subscriptions: HandlerSubscriptionManager,
+        // event emitter (handler -> event switch)
+        events: EventEmitter,
     ) -> Self
     where
         Self: Sized;
     /// Handle an RPC call (method + arguments) from the client.
     async fn handle_rpc_call(&self, input: &[u8]) -> HandlerResult<Vec<u8>>;
-    /// Subscribes a connection to a topic
-    fn subscribe(&self, topic: Topic);
-    /// Unsubscribes a connection from a topic
-    fn unsubscribe(&self, topic: Topic);
-    /// Emits an event to the event switch
-    async fn emit(&self, event: Event);
 }
 
 #[async_trait]
@@ -116,9 +120,9 @@ pub const HL_VERSION: &str = version!();
 pub struct Server<T>
 where
     T: Fn(
-        StateUpdateChannel, 
-        mpsc::UnboundedSender<ProxiedSubscriptionNotification>,
-        mpsc::UnboundedSender<Event>
+        StateUpdateChannel,
+        HandlerSubscriptionManager,
+        EventEmitter,
     ) -> Box<dyn ServerHandler + Send + Sync>,
     T: Send + Sync + 'static + Copy,
 {
@@ -129,52 +133,60 @@ where
     /// to send state updates to the runtime.
     pub factory: T,
     hl_version_string: HeaderValue,
-    event_rx: Arc<Mutex<mpsc::UnboundedReceiver<Event>>>,
-    event_tx: mpsc::UnboundedSender<Event>
+    event_rx: Option<mpsc::UnboundedReceiver<Event>>,
+    event_tx: mpsc::UnboundedSender<Event>,
 }
 
 impl<T> Server<T>
 where
     T: Fn(
-        StateUpdateChannel, 
-        mpsc::UnboundedSender<ProxiedSubscriptionNotification>,
-        mpsc::UnboundedSender<Event>
+        StateUpdateChannel,
+        HandlerSubscriptionManager,
+        EventEmitter,
     ) -> Box<dyn ServerHandler + Send + Sync>,
     T: Send + Sync + 'static + Copy,
 {
     pub fn new(config: ServerConfig, factory: T) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let event_rx = Arc::new(Mutex::new(event_rx));
         Self {
             hl_version_string: format!("hl/{}", config.version_major)
                 .parse()
                 .unwrap(),
             config,
             factory,
-            event_rx,
-            event_tx
+            event_rx: Some(event_rx),
+            event_tx,
         }
     }
-    
-    pub fn get_event_tx(&self) -> mpsc::UnboundedSender<Event> {
-        self.event_tx.clone()
+
+    pub fn get_event_emitter(&self) -> EventEmitter {
+        EventEmitter(self.event_tx.clone())
     }
 
-    pub async fn run(self) -> io::Result<()> {
+    pub async fn run(mut self) -> io::Result<()> {
         info!("Booting HL server v{}...", HL_VERSION);
         let acceptor = TlsAcceptor::from(Arc::new(self.config.tls.clone()));
         let listener = TcpListener::bind(&self.config.address).await?;
         info!("Listening on {} with TLS", self.config.address);
-        
+
         // handlers can subscribe to event topics here
-        let (subscription_notification_tx, subscription_notification_rx) = mpsc::unbounded_channel::<SubscriptionNotification>();
-        
-        let event_switch = EventSwitch::new(self.event_rx.clone(), subscription_notification_rx);
+        let (subscription_notification_tx, subscription_notification_rx) =
+            mpsc::unbounded_channel::<SubscriptionNotification>();
+
+        let event_switch = EventSwitch::new(
+            self.event_rx.take().unwrap(),
+            subscription_notification_rx,
+        );
         tokio::spawn(event_switch.run().instrument(info_span!("event_switch")));
 
         loop {
             if let Ok((stream, peer_addr)) = listener.accept().await {
-                self.handle_connection(stream, acceptor.clone(), peer_addr, subscription_notification_tx.clone(), self.event_tx.clone());
+                self.handle_connection(
+                    stream,
+                    acceptor.clone(),
+                    peer_addr,
+                    subscription_notification_tx.clone(),
+                );
             }
         }
     }
@@ -184,12 +196,20 @@ where
         stream: TcpStream,
         acceptor: TlsAcceptor,
         peer_addr: SocketAddr,
-        subscription_notification_tx: mpsc::UnboundedSender<SubscriptionNotification>,
-        events_switch_tx: mpsc::UnboundedSender<Event>
+        subscription_notification_tx: mpsc::UnboundedSender<
+            SubscriptionNotification,
+        >,
     ) {
         let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
-        let (proxy_subscription_notification_tx, mut proxy_subscription_notification_rx) = mpsc::unbounded_channel::<ProxiedSubscriptionNotification>();
-        let handler = (self.factory)(state_change_tx, proxy_subscription_notification_tx, events_switch_tx);
+        let (
+            proxy_subscription_notification_tx,
+            mut proxy_subscription_notification_rx,
+        ) = mpsc::unbounded_channel::<ProxiedSubscriptionNotification>();
+        let handler = (self.factory)(
+            state_change_tx,
+            HandlerSubscriptionManager(proxy_subscription_notification_tx),
+            self.get_event_emitter(),
+        );
         let version: HeaderValue = self.hl_version_string.clone();
         tokio::spawn(async move {
             let connection_span =
@@ -252,7 +272,7 @@ where
                 let mut in_flight = [false; u8::MAX as usize + 1];
 
                 let (rpc_tx, mut rpc_rx) = mpsc::channel(u8::MAX as usize + 1);
-                
+
                 let mut subscriptions: HashMap<Topic, SubscriptionID> = HashMap::new();
                 let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Event>();
 
@@ -340,7 +360,7 @@ where
                             let _enter = span.enter();
 
                             debug!("Received {} state update(s) from application. Serializing and sending...", state_changes.len());
-                            
+
                             Server::<T>::send_msg(ServerMessage::StateChange(state_changes), &mut ws_stream, compression.clone(), "state update").await;
                         }
                         // await subscription notifications from the handler
@@ -350,6 +370,9 @@ where
 
                             match notification {
                                 ProxiedSubscriptionNotification::Subscribe(topic) => {
+                                    if subscriptions.contains_key(&topic) {
+                                        continue;
+                                    }
                                     let id = {
                                         let mut id = [0; 16];
                                         rand::thread_rng().fill_bytes(&mut id);
@@ -380,10 +403,10 @@ where
                             let _enter = span.enter();
 
                             debug!("Received event from application after {:?}. Serializing and sending...", event.created_at.elapsed());
-                            
+
                             let Event { topic, payload, .. } = event;
                             Server::<T>::send_msg(
-                                ServerMessage::NewEvent { topic, payload }, 
+                                ServerMessage::NewEvent { topic, payload },
                                 &mut ws_stream, compression.clone(), "Event"
                             ).await;
                         }
@@ -394,7 +417,7 @@ where
             .await
         });
     }
-    
+
     async fn send_msg(
         msg: ServerMessage,
         ws_stream: &mut WebSocketStream<TlsStream<TcpStream>>,
@@ -408,7 +431,7 @@ where
                 return;
             }
         };
-        
+
         let msg = match deflate(msg.as_ref(), *compression) {
             Some(msg) => msg,
             None => {
@@ -421,13 +444,42 @@ where
             Ok(_) => trace!("{msg_type} sent"),
             Err(e) => {
                 warn!("Error sending {msg_type} to client: {}", e);
-                return
+                return;
             }
         };
     }
 }
 
-#[derive(Eq, PartialEq, Hash, Clone, Debug, Default, Archive, Serialize, Deserialize)]
+pub struct EventEmitter(mpsc::UnboundedSender<Event>);
+
+impl EventEmitter {
+    pub async fn emit(&self, event: Event) {
+        self.0.send(event).unwrap();
+        yield_now().await;
+    }
+}
+
+pub struct HandlerSubscriptionManager(
+    mpsc::UnboundedSender<ProxiedSubscriptionNotification>,
+);
+
+impl HandlerSubscriptionManager {
+    pub fn add(&self, topic: &Topic) {
+        self.0
+            .send(ProxiedSubscriptionNotification::Subscribe(topic.clone()))
+            .unwrap();
+    }
+
+    pub fn remove(&self, topic: &Topic) {
+        self.0
+            .send(ProxiedSubscriptionNotification::Unsubscribe(topic.clone()))
+            .unwrap();
+    }
+}
+
+#[derive(
+    Eq, PartialEq, Hash, Clone, Debug, Default, Archive, Serialize, Deserialize,
+)]
 #[archive(check_bytes)]
 pub struct Topic(Vec<u8>);
 
@@ -459,6 +511,10 @@ impl Topic {
     pub fn as_string(self) -> Result<String, Utf8Error> {
         String::from_utf8(self.0).map_err(|e| e.utf8_error())
     }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 pub type SubscriptionID = [u8; 16];
@@ -484,26 +540,39 @@ pub enum ProxiedSubscriptionNotification {
 pub struct Event {
     pub topic: Topic,
     pub payload: Vec<u8>,
-    pub created_at: Instant
+    pub created_at: Instant,
 }
 
 impl Event {
-    pub fn new(topic: Topic, payload: Vec<u8>) -> Self { Self { topic, payload, created_at: Instant::now() } }
+    pub fn new(topic: &Topic, payload: impl Into<Vec<u8>>) -> Self {
+        let payload = payload.into();
+        Self {
+            topic: topic.clone(),
+            payload,
+            created_at: Instant::now(),
+        }
+    }
 }
 
-/// The event switch is responsible for routing events from the application to the subscribed connections.
+/// The event switch is responsible for routing events from the application to
+/// the subscribed connections.
 pub struct EventSwitch {
-    new_event_rx: Arc<Mutex<mpsc::UnboundedReceiver<Event>>>,
+    /// A channel to receive new events from the application
+    new_event_rx: mpsc::UnboundedReceiver<Event>,
     /// A map of topic -> connections
-    subscriptions: HashMap<Topic, HashMap<SubscriptionID, mpsc::UnboundedSender<Event>>>,
+    subscriptions:
+        HashMap<Topic, HashMap<SubscriptionID, mpsc::UnboundedSender<Event>>>,
     /// Handlers notify the event switch about new subscriptions
-    subscription_notification_rx: mpsc::UnboundedReceiver<SubscriptionNotification>,
+    subscription_notification_rx:
+        mpsc::UnboundedReceiver<SubscriptionNotification>,
 }
 
 impl EventSwitch {
     fn new(
-        new_event_rx: Arc<Mutex<mpsc::UnboundedReceiver<Event>>>,
-        subscription_notification_rx: mpsc::UnboundedReceiver<SubscriptionNotification>
+        new_event_rx: mpsc::UnboundedReceiver<Event>,
+        subscription_notification_rx: mpsc::UnboundedReceiver<
+            SubscriptionNotification,
+        >,
     ) -> Self {
         Self {
             new_event_rx,
@@ -511,9 +580,8 @@ impl EventSwitch {
             subscription_notification_rx,
         }
     }
-    
+
     async fn run(mut self) {
-        let mut new_event_rx = self.new_event_rx.lock().await;
         loop {
             select! {
                 Some(notification) = self.subscription_notification_rx.recv() => {
@@ -542,7 +610,7 @@ impl EventSwitch {
                             }
                         }
                     }
-                    Some(event) = new_event_rx.recv() => {
+                    Some(event) = self.new_event_rx.recv() => {
                         trace!("Received event from application after {:?}", event.created_at.elapsed());
                         if let Some(subscribers) = self.subscriptions.get(&event.topic) {
                             trace!("Topic exists, sending event to {} subscribers", subscribers.len());

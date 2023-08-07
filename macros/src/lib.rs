@@ -238,21 +238,21 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
             #vis struct Handler {
                 // the runtime will provide the state when it creates the handler
                 #vis state: std::sync::Arc<StateController>,
-                subscription_notification_tx: ::hardlight::tokio::sync::mpsc::UnboundedSender<::hardlight::ProxiedSubscriptionNotification>,
-                event_tx: ::hardlight::tokio::sync::mpsc::UnboundedSender<::hardlight::Event>
+                subscriptions: ::hardlight::HandlerSubscriptionManager,
+                events: ::hardlight::EventEmitter
             }
 
             #[::hardlight::async_trait::async_trait]
             impl ::hardlight::ServerHandler for Handler {
                 fn new(
-                    suc: ::hardlight::StateUpdateChannel, 
-                    sntx: ::hardlight::tokio::sync::mpsc::UnboundedSender<::hardlight::ProxiedSubscriptionNotification>,
-                    etx: ::hardlight::tokio::sync::mpsc::UnboundedSender<::hardlight::Event>
+                    suc: ::hardlight::StateUpdateChannel,
+                    subscriptions: ::hardlight::HandlerSubscriptionManager,
+                    events: ::hardlight::EventEmitter
                 ) -> Self {
                     Self {
                         state: std::sync::Arc::new(StateController::new(suc)),
-                        subscription_notification_tx: sntx,
-                        event_tx: etx
+                        subscriptions,
+                        events
                     }
                 }
 
@@ -266,22 +266,6 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     match call {
                         #(#server_methods),*
                     }
-                }
-                
-                /// Subscribes the connection to the given topic
-                fn subscribe(&self, topic: ::hardlight::Topic) {
-                    self.subscription_notification_tx.send(::hardlight::ProxiedSubscriptionNotification::Subscribe(topic)).unwrap();
-                }
-                
-                /// Unsubscribes the connection from the given topic
-                fn unsubscribe(&self, topic: ::hardlight::Topic) {
-                    self.subscription_notification_tx.send(::hardlight::ProxiedSubscriptionNotification::Unsubscribe(topic)).unwrap();
-                }
-                
-                /// Emits an event to the event switch
-                async fn emit(&self, event: ::hardlight::Event) {
-                    self.event_tx.send(event).unwrap();
-                    ::tokio::task::yield_now().await;
                 }
             }
         }
@@ -440,7 +424,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                         None => Err(::hardlight::RpcHandlerError::ClientNotConnected),
                     }
                 }
-                
+
                 async fn subscribe(&self) -> ::hardlight::HandlerResult<::hardlight::tokio::sync::broadcast::Receiver<::hardlight::Event>> {
                     match &self.events_tx {
                         Some(events_tx) => Ok(events_tx.subscribe()),
@@ -530,7 +514,7 @@ pub fn codable(
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     let input = parse_macro_input!(item as syn::Item);
-    
+
     let name = match &input {
         syn::Item::Struct(s) => &s.ident,
         syn::Item::Enum(e) => &e.ident,
@@ -541,7 +525,7 @@ pub fn codable(
         #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
         #[archive(crate = "::hardlight::rkyv", check_bytes)]
         #input
-        
+
         impl ::std::convert::Into<Vec<u8>> for #name {
             fn into(self) -> Vec<u8> {
                 ::hardlight::rkyv::to_bytes::<_, 1024>(&self).unwrap().into_vec()

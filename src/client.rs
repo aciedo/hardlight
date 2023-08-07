@@ -1,4 +1,9 @@
-use std::{fmt::Debug, str::FromStr, sync::Arc, time::{SystemTime, Instant}};
+use std::{
+    fmt::Debug,
+    str::FromStr,
+    sync::Arc,
+    time::{Instant, SystemTime},
+};
 
 use async_trait::async_trait;
 use flate2::Compression;
@@ -6,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use rustls_native_certs::load_native_certs;
 use tokio::{
     select,
-    sync::{mpsc, oneshot, RwLock, RwLockReadGuard, broadcast},
+    sync::{broadcast, mpsc, oneshot, RwLock, RwLockReadGuard},
 };
 use tokio_rustls::rustls::{
     client::{ServerCertVerified, ServerCertVerifier},
@@ -23,13 +28,14 @@ use tokio_tungstenite::{
     },
     Connector,
 };
-use tracing::{debug, error, span, warn, Instrument, Level, trace};
+use tracing::{debug, error, span, trace, warn, Instrument, Level};
 use version::Version;
 
 use crate::{
     deflate, inflate,
     server::{HandlerResult, HL_VERSION},
-    wire::{ClientMessage, RpcHandlerError, ServerMessage}, StateUpdate, Event,
+    wire::{ClientMessage, RpcHandlerError, ServerMessage},
+    Event, StateUpdate,
 };
 
 use array_init::array_init;
@@ -41,10 +47,8 @@ pub struct ClientConfig {
 }
 
 pub trait ClientState {
-    fn apply_changes(
-        &mut self,
-        changes: Vec<StateUpdate>,
-    ) -> HandlerResult<()>;
+    fn apply_changes(&mut self, changes: Vec<StateUpdate>)
+        -> HandlerResult<()>;
 }
 
 #[async_trait]
@@ -156,11 +160,7 @@ where
 
             match headers.get("Sec-WebSocket-Protocol") {
                 Some(protocol) if protocol == &self.hl_version_string => {
-                    let compression = headers.get("X-HL-Compress")
-                        .and_then(|h| h.to_str().ok())
-                        .and_then(|n| n.parse::<u32>().ok())
-                        .filter(|&c| c <= 9)
-                        .map(|c| Compression::new(c));
+                    let compression = headers.get("X-HL-Compress").and_then(|h| h.to_str().ok()).and_then(|n| n.parse::<u32>().ok()).filter(|&c| c <= 9).map(|c| Compression::new(c));
 
                     trace!(
                         "HardLight connection established [{}, compression {}]",
@@ -322,7 +322,7 @@ where
         .instrument(connection_span)
         .await
     }
-    
+
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events_tx.subscribe()
     }
