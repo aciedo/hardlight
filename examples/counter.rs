@@ -11,7 +11,7 @@ async fn main() {
     let config = ServerConfig::new_self_signed("localhost:8080");
     let server = Server::new(config, factory!(Handler));
     // get a server event emitter
-    let emitter = server.get_event_emitter();
+    let event_emitter = server.get_event_emitter();
     // spawn the server in the background
     tokio::spawn(async move { server.run().await.unwrap() });
 
@@ -57,8 +57,8 @@ async fn main() {
     // this is sent directly to the event switch which sends it to the server's
     // subscribed connection managers, which then send it to their subscribed
     // clients
-    emitter
-        .emit(Event::new(&topic, CounterEvent::ServerSentTest))
+    event_emitter
+        .emit(&topic, CounterEvent::ServerSentTest)
         .await;
 
     // this will emit an "incremented" event to the counter's topic
@@ -124,7 +124,7 @@ impl Counter for Handler {
             from: state.counter,
         };
         state.counter = new;
-        self.events.emit(Event::new(&state.topic, event)).await;
+        self.events.emit(&state.topic, event).await;
         Ok(())
     }
 
@@ -136,12 +136,11 @@ impl Counter for Handler {
             from: state.counter,
         };
         state.counter = new;
-        self.events.emit(Event::new(&state.topic, event)).await;
+        self.events.emit(&state.topic, event).await;
         Ok(())
     }
 
     async fn get(&self) -> HandlerResult<u32> {
-        let state = self.state.read().await;
-        Ok(state.counter)
+        Ok(self.state.read().await.counter)
     }
 }

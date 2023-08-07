@@ -453,7 +453,8 @@ where
 pub struct EventEmitter(mpsc::UnboundedSender<Event>);
 
 impl EventEmitter {
-    pub async fn emit(&self, event: Event) {
+    pub async fn emit(&self, topic: &Topic, payload: impl Into<Vec<u8>>) {
+        let event = Event::new(topic, payload);
         self.0.send(event).unwrap();
         yield_now().await;
     }
