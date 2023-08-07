@@ -1,7 +1,7 @@
 use std::{
     io,
     net::SocketAddr,
-    str::{FromStr, Utf8Error},
+    str::FromStr,
     sync::Arc,
     time::Instant,
 };
@@ -478,42 +478,64 @@ impl HandlerSubscriptionManager {
 }
 
 #[derive(
-    Eq, PartialEq, Hash, Clone, Debug, Default, Archive, Serialize, Deserialize,
+    Eq, PartialEq, Hash, Clone, Default, Archive, Serialize, Deserialize,
 )]
 #[archive(check_bytes)]
-pub struct Topic(Vec<u8>);
+pub struct Topic {
+    inner: Vec<u8>,
+    is_string: bool,
+}
 
 impl Into<Vec<u8>> for Topic {
     fn into(self) -> Vec<u8> {
-        self.0
+        self.inner
     }
 }
 
 impl Into<Topic> for Vec<u8> {
     fn into(self) -> Topic {
-        Topic(self)
+        Topic {
+            inner: self,
+            is_string: false,
+        }
     }
 }
 
 impl Into<Topic> for &str {
     fn into(self) -> Topic {
-        Topic(self.as_bytes().to_vec())
+        Topic {
+            inner: self.as_bytes().to_vec(),
+            is_string: true,
+        }
     }
 }
 
 impl Into<Topic> for String {
     fn into(self) -> Topic {
-        Topic(self.as_bytes().to_vec())
+        Topic {
+            inner: self.into_bytes(),
+            is_string: true,
+        }
     }
 }
 
 impl Topic {
-    pub fn as_string(self) -> Result<String, Utf8Error> {
-        String::from_utf8(self.0).map_err(|e| e.utf8_error())
+    pub fn as_string(&self) -> String {
+        String::from_utf8(self.inner.clone()).unwrap_or("".to_string())
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.inner
+    }
+}
+
+impl std::fmt::Debug for Topic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_string {
+            write!(f, "{}", self.as_string())
+        } else {
+            write!(f, "{:?}", self.inner)
+        }
     }
 }
 
