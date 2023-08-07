@@ -118,22 +118,24 @@ impl Counter for Handler {
 
     async fn increment(&self, amount: u32) -> HandlerResult<()> {
         let mut state = self.state.write().await;
+        let new = state.counter + amount;
         let event = CounterEvent::Incremented {
-            to: state.counter + amount,
+            to: new,
             from: state.counter,
         };
-        state.counter += amount;
+        state.counter = new;
         self.events.emit(Event::new(&state.topic, event)).await;
         Ok(())
     }
 
     async fn decrement(&self, amount: u32) -> HandlerResult<()> {
         let mut state = self.state.write().await;
+        let new = state.counter - amount;
         let event = CounterEvent::Decremented {
-            to: state.counter - amount,
+            to: new,
             from: state.counter,
         };
-        state.counter -= amount;
+        state.counter = new;
         self.events.emit(Event::new(&state.topic, event)).await;
         Ok(())
     }
