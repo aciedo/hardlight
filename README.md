@@ -23,15 +23,13 @@ While there isn't an official "specification", we take a similar approach to Bit
 
 All features will be completed for 1.0.0 apart from those marked with an asterisk.
 
-- [ ] RPC (from [@617a7a](https://github.com/617a7a))
+- [x] RPC
   - [x] Connection state
     - [x] `connection_state` macro
     - [x] client state
     - [x] mutex'd server state
     - [x] server state autosync
-  - [ ] RPC macro
-    - [x] `#[rpc]` macro
-    - [ ] `#[rpc(Event)]` macro
+  - [x] RPC macro
   - [ ] client
     - [x] self-signed TLS
     - [ ] wasm client*
@@ -40,18 +38,17 @@ All features will be completed for 1.0.0 apart from those marked with an asteris
   - [x] server
     - [x] version agreement
     - [x] run in background
-- [ ] Events (from [@beast4coder](https://github.com/beast4coder))
-  - [ ] finish scoping out API **[IN PROGRESS]**
+- [x] Events 
   - [x] wire support
-  - [ ] client
-    - [ ] event hooks of some variation
+  - [x] client
+    - [x] event hooks of some variation
     - [ ] wasm client*
-  - [ ] server
-    - [ ] multi-connection topic management
-      - [ ] retrieve broadcast receivers from main server
-      - [ ] create topic handlers for server-scoped unique topics
-      - [ ] clean up topic handlers with no subscribers
-    - [ ] subscribe/unsubscribe a connection to a topic from server-side RPC handlers
+  - [x] server
+    - [x] multi-connection topic management
+      - [x] retrieve broadcast receivers from main server
+      - [x] create topic handlers for server-scoped unique topics
+      - [x] clean up topic handlers with no subscribers
+    - [x] subscribe/unsubscribe a connection to a topic from server-side RPC handlers
 
 ## Features
 
