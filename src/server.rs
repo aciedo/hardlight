@@ -135,6 +135,8 @@ where
     hl_version_string: HeaderValue,
     event_rx: Option<mpsc::UnboundedReceiver<Event>>,
     event_tx: mpsc::UnboundedSender<Event>,
+    topic_notif_rx: Option<mpsc::UnboundedReceiver<TopicNotification>>,
+    topic_notif_tx: mpsc::UnboundedSender<TopicNotification>,
 }
 
 impl<T> Server<T>
@@ -148,6 +150,8 @@ where
 {
     pub fn new(config: ServerConfig, factory: T) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (topic_notif_tx, topic_notif_rx) =
+            mpsc::unbounded_channel();
         Self {
             hl_version_string: format!("hl/{}", config.version_major)
                 .parse()
@@ -156,11 +160,17 @@ where
             factory,
             event_rx: Some(event_rx),
             event_tx,
+            topic_notif_rx: Some(topic_notif_rx),
+            topic_notif_tx,
         }
     }
 
     pub fn get_event_emitter(&self) -> EventEmitter {
         EventEmitter(self.event_tx.clone())
+    }
+    
+    pub fn get_topic_notifier(&mut self) -> Option<mpsc::UnboundedReceiver<TopicNotification>> {
+        self.topic_notif_rx.take()
     }
 
     pub async fn run(mut self) -> io::Result<()> {
@@ -176,6 +186,7 @@ where
         let event_switch = EventSwitch::new(
             self.event_rx.take().unwrap(),
             subscription_notification_rx,
+            self.topic_notif_tx.clone(),
         );
         tokio::spawn(event_switch.run().instrument(info_span!("event_switch")));
 
@@ -577,6 +588,13 @@ impl Event {
     }
 }
 
+/// Sent by the event switch to the application to tell it about topics
+/// that have been subscribed to or unsubscribed from.
+pub enum TopicNotification {
+    Created(Topic),
+    Removed(Topic),
+}
+
 /// The event switch is responsible for routing events from the application to
 /// the subscribed connections.
 pub struct EventSwitch {
@@ -588,6 +606,8 @@ pub struct EventSwitch {
     /// Handlers notify the event switch about new subscriptions
     subscription_notification_rx:
         mpsc::UnboundedReceiver<SubscriptionNotification>,
+    topic_notif_tx:
+        mpsc::UnboundedSender<TopicNotification>,
 }
 
 impl EventSwitch {
@@ -596,11 +616,14 @@ impl EventSwitch {
         subscription_notification_rx: mpsc::UnboundedReceiver<
             SubscriptionNotification,
         >,
+        topic_notif_tx:
+            mpsc::UnboundedSender<TopicNotification>,
     ) -> Self {
         Self {
             new_event_rx,
             subscriptions: HashMap::new(),
             subscription_notification_rx,
+            topic_notif_tx,
         }
     }
 
@@ -619,7 +642,8 @@ impl EventSwitch {
                                     trace!("Topic does not exist, creating topic and adding subscriber");
                                     let mut subscribers = HashMap::new();
                                     subscribers.insert(id, tx);
-                                    self.subscriptions.insert(topic, subscribers);
+                                    self.subscriptions.insert(topic.clone(), subscribers);
+                                    self.topic_notif_tx.send(TopicNotification::Created(topic)).unwrap();
                                 }
                             }
                             SubscriptionNotification::Unsubscribe { topic, id } => {
@@ -627,11 +651,18 @@ impl EventSwitch {
                                 if let Some(subscribers) = self.subscriptions.get_mut(&topic) {
                                     trace!("Topic exists, removing subscriber");
                                     subscribers.remove(&id);
+                                    
+                                    if subscribers.is_empty() {
+                                        trace!("Topic has no more subscribers, removing topic");
+                                        self.subscriptions.remove(&topic);
+                                        self.topic_notif_tx.send(TopicNotification::Removed(topic)).unwrap();
+                                    }
                                 } else {
                                     trace!("Topic does not exist, ignoring unsubscribe");
                                 }
                             }
                         }
+                        trace!("Sending subscription notification to application");
                     }
                     Some(event) = self.new_event_rx.recv() => {
                         trace!("Received event from application after {:?}", event.created_at.elapsed());
