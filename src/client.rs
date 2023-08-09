@@ -151,7 +151,18 @@ where
         async move {
             let connector = Connector::Rustls(Arc::new(self.config.tls.clone()));
 
-            let req = Request::builder().method("GET").header("Host", self.config.host.clone()).header("Connection", "Upgrade").header("Upgrade", "websocket").header("Sec-WebSocket-Version", "13").header("Sec-WebSocket-Key", generate_key()).header("Sec-WebSocket-Protocol", self.hl_version_string.clone()).header("X-HL-Compress", self.config.compression.level()).uri(format!("wss://{}/", self.config.host)).body(()).unwrap();
+            let req = Request::builder()
+                .method("GET")
+                .header("Host", self.config.host.clone())
+                .header("Connection", "Upgrade")
+                .header("Upgrade", "websocket")
+                .header("Sec-WebSocket-Version", "13")
+                .header("Sec-WebSocket-Key", generate_key())
+                .header("Sec-WebSocket-Protocol", self.hl_version_string.clone())
+                .header("X-HL-Compress", self.config.compression.level())
+                .uri(format!("wss://{}/", self.config.host))
+                .body(())
+                .unwrap();
 
             debug!("Connecting to server...");
             let (mut stream, res) = connect_async_tls_with_config(req, None, Some(connector)).await?;

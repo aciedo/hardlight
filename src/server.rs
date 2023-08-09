@@ -1,10 +1,4 @@
-use std::{
-    io,
-    net::SocketAddr,
-    str::FromStr,
-    sync::Arc,
-    time::Instant,
-};
+use std::{io, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use flate2::Compression;
@@ -150,8 +144,7 @@ where
 {
     pub fn new(config: ServerConfig, factory: T) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let (topic_notif_tx, topic_notif_rx) =
-            mpsc::unbounded_channel();
+        let (topic_notif_tx, topic_notif_rx) = mpsc::unbounded_channel();
         Self {
             hl_version_string: format!("hl/{}", config.version_major)
                 .parse()
@@ -168,8 +161,10 @@ where
     pub fn get_event_emitter(&self) -> EventEmitter {
         EventEmitter(self.event_tx.clone())
     }
-    
-    pub fn get_topic_notifier(&mut self) -> Option<mpsc::UnboundedReceiver<TopicNotification>> {
+
+    pub fn get_topic_notifier(
+        &mut self,
+    ) -> Option<mpsc::UnboundedReceiver<TopicNotification>> {
         self.topic_notif_rx.take()
     }
 
@@ -461,12 +456,14 @@ where
     }
 }
 
+/// A struct that allows the application server to emit events onto the event switch.
 pub struct EventEmitter(mpsc::UnboundedSender<Event>);
 
 impl EventEmitter {
+    /// Emits an event to the HardLight server's event switch.
     pub async fn emit(&self, topic: &Topic, payload: impl Into<Vec<u8>>) {
         let event = Event::new(topic, payload);
-        self.0.send(event).unwrap();
+        let _ = self.0.send(event);
         yield_now().await;
     }
 }
@@ -553,6 +550,9 @@ impl std::fmt::Debug for Topic {
 
 pub type SubscriptionID = [u8; 16];
 
+/// Subscription notifications are sent from connection managers
+/// to the event switch to subscribe/unsubscribe the connection
+/// to/from topics.
 pub enum SubscriptionNotification {
     Subscribe {
         topic: Topic,
@@ -565,6 +565,10 @@ pub enum SubscriptionNotification {
     },
 }
 
+/// Proxied subscription notifications are what the application handler
+/// sends to the connection manager to tell it to subscribe/unsubscribe
+/// to/from topics. The connection handler then does the hard work of
+/// talking to the event switch and sending events down the connection.
 pub enum ProxiedSubscriptionNotification {
     Subscribe(Topic),
     Unsubscribe(Topic),
@@ -588,8 +592,8 @@ impl Event {
     }
 }
 
-/// Sent by the event switch to the application to tell it about topics
-/// that have been subscribed to or unsubscribed from.
+/// Sent by the event switch to the application to tell it when topics
+/// are created or removed.
 pub enum TopicNotification {
     Created(Topic),
     Removed(Topic),
@@ -606,8 +610,8 @@ pub struct EventSwitch {
     /// Handlers notify the event switch about new subscriptions
     subscription_notification_rx:
         mpsc::UnboundedReceiver<SubscriptionNotification>,
-    topic_notif_tx:
-        mpsc::UnboundedSender<TopicNotification>,
+    /// The event switch notifies the application about topic changes
+    topic_notif_tx: mpsc::UnboundedSender<TopicNotification>,
 }
 
 impl EventSwitch {
@@ -616,8 +620,7 @@ impl EventSwitch {
         subscription_notification_rx: mpsc::UnboundedReceiver<
             SubscriptionNotification,
         >,
-        topic_notif_tx:
-            mpsc::UnboundedSender<TopicNotification>,
+        topic_notif_tx: mpsc::UnboundedSender<TopicNotification>,
     ) -> Self {
         Self {
             new_event_rx,
@@ -643,7 +646,7 @@ impl EventSwitch {
                                     let mut subscribers = HashMap::new();
                                     subscribers.insert(id, tx);
                                     self.subscriptions.insert(topic.clone(), subscribers);
-                                    self.topic_notif_tx.send(TopicNotification::Created(topic)).unwrap();
+                                    let _ = self.topic_notif_tx.send(TopicNotification::Created(topic));
                                 }
                             }
                             SubscriptionNotification::Unsubscribe { topic, id } => {
@@ -651,11 +654,11 @@ impl EventSwitch {
                                 if let Some(subscribers) = self.subscriptions.get_mut(&topic) {
                                     trace!("Topic exists, removing subscriber");
                                     subscribers.remove(&id);
-                                    
+
                                     if subscribers.is_empty() {
                                         trace!("Topic has no more subscribers, removing topic");
                                         self.subscriptions.remove(&topic);
-                                        self.topic_notif_tx.send(TopicNotification::Removed(topic)).unwrap();
+                                        let _ = self.topic_notif_tx.send(TopicNotification::Removed(topic));
                                     }
                                 } else {
                                     trace!("Topic does not exist, ignoring unsubscribe");
@@ -666,10 +669,18 @@ impl EventSwitch {
                     }
                     Some(event) = self.new_event_rx.recv() => {
                         trace!("Received event from application after {:?}", event.created_at.elapsed());
-                        if let Some(subscribers) = self.subscriptions.get(&event.topic) {
+                        if let Some(subscribers) = self.subscriptions.get_mut(&event.topic) {
                             trace!("Topic exists, sending event to {} subscribers", subscribers.len());
-                            for (_, connection) in subscribers {
-                                connection.send(event.clone()).unwrap();
+                            let mut subs_to_remove = vec![];
+                            for (id, connection) in subscribers.iter() {
+                                if let Err(e) = connection.send(event.clone()) {
+                                    warn!("Failed to send event to subscriber: {}", e);
+                                    subs_to_remove.push(id.clone());
+                                    warn!("Removing subscriber");
+                                }
+                            }
+                            for id in subs_to_remove {
+                                subscribers.remove(&id);
                             }
                         } else {
                             trace!("Topic has no subscribers, ignoring event");
