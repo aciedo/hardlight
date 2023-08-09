@@ -522,7 +522,7 @@ pub fn codable(
     };
 
     let expanded = quote! {
-        #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
+        #[derive(::hardlight::rkyv_derive::Archive, ::hardlight::rkyv_derive::Serialize, ::hardlight::rkyv_derive::Deserialize)]
         #[archive(crate = "::hardlight::rkyv", check_bytes)]
         #input
 

@@ -57,9 +57,7 @@ async fn main() {
     // this is sent directly to the event switch which sends it to the server's
     // subscribed connection managers, which then send it to their subscribed
     // clients
-    event_emitter
-        .emit(&topic, CounterEvent::ServerSentTest)
-        .await;
+    event_emitter.emit(&topic, CounterEvent::ServerSentTest).await;
 
     // this will emit an "incremented" event to the counter's topic
     client.increment(1).await.unwrap();
