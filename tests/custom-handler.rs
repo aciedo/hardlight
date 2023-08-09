@@ -20,13 +20,21 @@ pub struct State {
 pub struct Handler {
     // the runtime will provide the state when it creates the handler
     pub state: Arc<StateController>,
+    _subscriptions: HandlerSubscriptionManager,
+    _events: EventEmitter,
 }
 
 #[rpc_handler]
 impl ServerHandler for Handler {
-    fn new(state_update_channel: StateUpdateChannel) -> Self {
+    fn new(
+        suc: StateUpdateChannel,
+        subscriptions: HandlerSubscriptionManager,
+        events: EventEmitter,
+    ) -> Self {
         Self {
-            state: Arc::new(StateController::new(state_update_channel)),
+            state: Arc::new(StateController::new(suc)),
+            _subscriptions: subscriptions,
+            _events: events,
         }
     }
 

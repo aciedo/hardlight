@@ -5,19 +5,28 @@ use std::sync::Arc;
 
 use crate::service::*;
 use hardlight::*;
+use tokio::task::yield_now;
 
 use self::{decrement::*, increment::*};
 
 pub struct Handler {
     // the runtime will provide the state when it creates the handler
     pub state: Arc<StateController>,
+    subscriptions: HandlerSubscriptionManager,
+    events: UnboundedSender<Event>,
 }
 
 #[rpc_handler]
 impl ServerHandler for Handler {
-    fn new(state_update_channel: StateUpdateChannel) -> Self {
+    fn new(
+        suc: StateUpdateChannel,
+        subscriptions: HandlerSubscriptionManager,
+        events: UnboundedSender<Event>,
+    ) -> Self {
         Self {
-            state: Arc::new(StateController::new(state_update_channel)),
+            state: Arc::new(StateController::new(suc)),
+            subscriptions,
+            events,
         }
     }
 
@@ -29,11 +38,28 @@ impl ServerHandler for Handler {
             RpcCall::Decrement { amount } => {
                 handle(decrement(self, amount)).await
             }
-            RpcCall::Get {} => handle::<_, HandlerResult<_>>(async move {
-                let state = self.state.read().await;
-                Ok(state.counter)
-            }).await,
+            RpcCall::Get {} => {
+                handle::<_, HandlerResult<_>>(async move {
+                    let state = self.state.read().await;
+                    Ok(state.counter)
+                })
+                .await
+            }
             RpcCall::TestOverhead {} => Ok(vec![]),
         }
+    }
+
+    /// Subscribes the connection to the given topic
+    fn subscribe(&self, topic: Topic) {
+        self.subscription_notification_tx
+            .send(ProxiedSubscriptionNotification::Subscribe(topic))
+            .unwrap();
+    }
+
+    /// Unsubscribes the connection from the given topic
+    fn unsubscribe(&self, topic: Topic) {
+        self.subscription_notification_tx
+            .send(ProxiedSubscriptionNotification::Unsubscribe(topic))
+            .unwrap();
     }
 }

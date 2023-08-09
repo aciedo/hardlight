@@ -67,13 +67,7 @@ async fn main() -> Result<(), std::io::Error> {
 
     let mut timings: Vec<Duration> = Vec::new();
 
-    let bar = ProgressBar::new(num_clients as u64 * tasks_per_client as u64 * invocs_per_task as u64)
-        .with_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.blue} [{elapsed_precise}] ({eta}) {bar:50.green/blue} {pos:>7}/{len:7} {per_sec} {msg}")
-                .unwrap()
-                .progress_chars("█░⎯")
-        );
+    let bar = ProgressBar::new(num_clients as u64 * tasks_per_client as u64 * invocs_per_task as u64).with_style(ProgressStyle::default_bar().template("{spinner:.blue} [{elapsed_precise}] ({eta}) {bar:50.green/blue} {pos:>7}/{len:7} {per_sec} {msg}").unwrap().progress_chars("█░⎯"));
 
     loop {
         match timeout(Duration::from_millis(10), recv.recv())

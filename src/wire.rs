@@ -1,5 +1,7 @@
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 
+use crate::{StateUpdate, Topic};
+
 #[derive(Archive, Serialize, Deserialize)]
 #[archive_attr(derive(CheckBytes))]
 pub enum ClientMessage {
@@ -40,10 +42,11 @@ pub enum ServerMessage {
         /// The event serialized with rkyv. The format of this will differ
         /// between applications. The macros handle generating the code for
         /// this.
-        event: Vec<u8>,
+        topic: Topic,
+        payload: Vec<u8>,
     },
     /// The server updates the connection state.
-    StateChange(Vec<(usize, Vec<u8>)>),
+    StateChange(Vec<StateUpdate>),
 }
 
 #[derive(Archive, Serialize, Deserialize, Debug)]

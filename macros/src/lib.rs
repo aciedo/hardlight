@@ -22,7 +22,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
 
         #vis struct StateController {
             state: ::hardlight::tokio::sync::RwLock<#state_ident>,
-            channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
+            channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<StateUpdate>>>,
         }
 
         impl StateController {
@@ -50,7 +50,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
         #vis struct StateGuard<'a> {
             state: ::hardlight::tokio::sync::RwLockWriteGuard<'a, #state_ident>,
             starting_state: #state_ident,
-            channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
+            channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<StateUpdate>>>,
         }
 
         impl<'a> Drop for StateGuard<'a> {
@@ -61,10 +61,10 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
 
                 #(
                     if self.state.#field_names != self.starting_state.#field_names {
-                        changes.push((
-                            #field_indices,
-                            ::hardlight::rkyv::to_bytes::<_, 1024>(&self.state.#field_names).unwrap().to_vec(),
-                        ));
+                        changes.push(::hardlight::StateUpdate {
+                            index: #field_indices,
+                            data: ::hardlight::rkyv::to_bytes::<_, 1024>(&self.state.#field_names).unwrap().to_vec(),
+                        });
                     }
                 )*
 
@@ -80,6 +80,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
                     // this could fail if the server shuts down before these
                     // changes are sent... but we're not too worried about that
                     let _ = channel.send(changes).await;
+                    // ::hardlight::tokio::task::yield_now().await;
                 });
             }
         }
@@ -101,13 +102,13 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
         impl ::hardlight::ClientState for State {
             fn apply_changes(
                 &mut self,
-                changes: Vec<(usize, Vec<u8>)>,
+                changes: Vec<StateUpdate>,
             ) -> ::hardlight::HandlerResult<()> {
-                for (field_index, new_value) in changes {
-                    match field_index {
+                for ::hardlight::StateUpdate { index, data } in changes {
+                    match index {
                         #(
                             #field_indices => {
-                                self.#field_names = ::hardlight::rkyv::from_bytes(&new_value)
+                                self.#field_names = ::hardlight::rkyv::from_bytes(&data)
                                     .map_err(|_| ::hardlight::RpcHandlerError::BadInputBytes)?;
                             }
                         ),*
@@ -237,13 +238,21 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
             #vis struct Handler {
                 // the runtime will provide the state when it creates the handler
                 #vis state: std::sync::Arc<StateController>,
+                subscriptions: ::hardlight::HandlerSubscriptionManager,
+                events: ::hardlight::EventEmitter
             }
 
             #[::hardlight::async_trait::async_trait]
             impl ::hardlight::ServerHandler for Handler {
-                fn new(state_update_channel: ::hardlight::StateUpdateChannel) -> Self {
+                fn new(
+                    suc: ::hardlight::StateUpdateChannel,
+                    subscriptions: ::hardlight::HandlerSubscriptionManager,
+                    events: ::hardlight::EventEmitter
+                ) -> Self {
                     Self {
-                        state: std::sync::Arc::new(StateController::new(state_update_channel)),
+                        state: std::sync::Arc::new(StateController::new(suc)),
+                        subscriptions,
+                        events
                     }
                 }
 
@@ -312,6 +321,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     self_signed: true,
                     shutdown: None,
                     rpc_tx: None,
+                    events_tx: None,
                     state: None,
                     compression,
                 }
@@ -323,6 +333,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     self_signed: false,
                     shutdown: None,
                     rpc_tx: None,
+                    events_tx: None,
                     state: None,
                     compression,
                 }
@@ -337,6 +348,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     self_signed: false,
                     shutdown: None,
                     rpc_tx: None,
+                    events_tx: None,
                     state: None,
                     compression,
                 }
@@ -351,6 +363,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 self_signed: bool,
                 shutdown: Option<::hardlight::tokio::sync::oneshot::Sender<()>>,
                 rpc_tx: Option<::hardlight::tokio::sync::mpsc::Sender<(Vec<u8>, ::hardlight::RpcResponseSender)>>,
+                events_tx: Option<std::sync::Arc<::hardlight::tokio::sync::broadcast::Sender<::hardlight::Event>>>,
                 state: Option<std::sync::Arc<::hardlight::tokio::sync::RwLock<State>>>,
                 compression: ::hardlight::Compression,
             }
@@ -386,12 +399,13 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     });
 
                     tokio::select! {
-                        Ok((rpc_tx, state)) = control_channels_rx => {
+                        Ok((rpc_tx, state, events_tx)) = control_channels_rx => {
                             // at this point, the client will NOT return any errors, so we
                             // can safely ignore the error_rx channel
                             ::hardlight::tracing::debug!("Received control channels from client");
                             self.shutdown = Some(shutdown);
                             self.rpc_tx = Some(rpc_tx);
+                            self.events_tx = Some(events_tx);
                             self.state = Some(state);
                             Ok(())
                         }
@@ -407,6 +421,13 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 async fn state(&self) -> ::hardlight::HandlerResult<::hardlight::tokio::sync::RwLockReadGuard<'_, Self::State>> {
                     match &self.state {
                         Some(state) => Ok(state.read().await),
+                        None => Err(::hardlight::RpcHandlerError::ClientNotConnected),
+                    }
+                }
+
+                async fn subscribe(&self) -> ::hardlight::HandlerResult<::hardlight::tokio::sync::broadcast::Receiver<::hardlight::Event>> {
+                    match &self.events_tx {
+                        Some(events_tx) => Ok(events_tx.subscribe()),
                         None => Err(::hardlight::RpcHandlerError::ClientNotConnected),
                     }
                 }
@@ -494,10 +515,28 @@ pub fn codable(
 ) -> proc_macro::TokenStream {
     let input = parse_macro_input!(item as syn::Item);
 
+    let name = match &input {
+        syn::Item::Struct(s) => &s.ident,
+        syn::Item::Enum(e) => &e.ident,
+        _ => panic!("Only structs and enums can be codable"),
+    };
+
     let expanded = quote! {
         #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
         #[archive(crate = "::hardlight::rkyv", check_bytes)]
         #input
+
+        impl ::std::convert::Into<Vec<u8>> for #name {
+            fn into(self) -> Vec<u8> {
+                ::hardlight::rkyv::to_bytes::<_, 1024>(&self).unwrap().into_vec()
+            }
+        }
+
+        impl ::std::convert::From<Vec<u8>> for #name {
+            fn from(bytes: Vec<u8>) -> Self {
+                ::hardlight::rkyv::from_bytes(&bytes).unwrap()
+            }
+        }
     };
 
     proc_macro::TokenStream::from(expanded)
