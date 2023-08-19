@@ -109,7 +109,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
                         #(
                             #field_indices => {
                                 self.#field_names = ::hardlight::rkyv::from_bytes(&data)
-                                    .map_err(|_| ::hardlight::RpcHandlerError::BadInputBytes)?;
+                                    .map_err(|_| ::hardlight::RpcHandlerError::ClientDecodeError)?;
                             }
                         ),*
                         _ => {}
@@ -261,7 +261,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     input: &[u8],
                 ) -> Result<Vec<u8>, ::hardlight::RpcHandlerError> {
                     let call: RpcCall = ::hardlight::rkyv::from_bytes(input)
-                        .map_err(|_| ::hardlight::RpcHandlerError::BadInputBytes)?;
+                        .map_err(|_| ::hardlight::RpcHandlerError::ServerDecodeError)?;
 
                     match call {
                         #(#server_methods),*
@@ -303,7 +303,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     async fn #method_ident(#method_inputs) #method_output {
                         match self.make_rpc_call(RpcCall::#rpc_call_variant { #(#rpc_call_params),* }).await {
                             Ok(c) => ::hardlight::rkyv::from_bytes(&c)
-                                .map_err(|_| ::hardlight::RpcHandlerError::BadOutputBytes),
+                                .map_err(|_| ::hardlight::RpcHandlerError::ClientDecodeError),
                             Err(e) => Err(e),
                         }
                     }
@@ -450,7 +450,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                         rpc_chan
                             .send((
                                 ::hardlight::rkyv::to_bytes::<RpcCall, 1024>(&call)
-                                    .map_err(|_| ::hardlight::RpcHandlerError::BadInputBytes)?
+                                    .map_err(|_| ::hardlight::RpcHandlerError::ClientEncodeError)?
                                     .to_vec(),
                                 tx,
                             ))

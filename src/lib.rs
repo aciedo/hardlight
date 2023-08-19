@@ -98,5 +98,5 @@ where
     <T as Archive>::Archived: for<'b> CheckBytes<DefaultValidator<'b>>
         + Deserialize<T, SharedDeserializeMap>,
 {
-    rkyv::from_bytes::<T>(bytes).map_err(|_| RpcHandlerError::BadInputBytes)
+    rkyv::from_bytes::<T>(bytes).map_err(|_| RpcHandlerError::ServerDecodeError)
 }

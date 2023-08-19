@@ -50,14 +50,26 @@ pub enum ServerMessage {
 }
 
 #[derive(Archive, Serialize, Deserialize, Debug)]
-#[archive_attr(derive(CheckBytes))]
+#[archive(check_bytes)]
 pub enum RpcHandlerError {
-    /// The input bytes for the RPC call were invalid.
-    BadInputBytes,
-    /// The output bytes for the RPC call were invalid.
-    BadOutputBytes,
     /// You tried to make an RPC call before your client was connected
     ClientNotConnected,
     /// You've tried to make too many RPC calls at once.
+    /// This will come from your client instead of the server, which
+    /// will simply ignore your RPC request to prevent overloads.
     TooManyCallsInFlight,
+    /// Client failed to encode something
+    ClientEncodeError,
+    /// Client failed to decode something
+    ClientDecodeError,
+    /// Client failed to encode something
+    ServerEncodeError,
+    /// Client failed to decode something
+    ServerDecodeError,
+    ClientCompressError,
+    ClientDecompressError,
+    ServerCompressError,
+    ServerDecompressError,
+    /// The server handler task fatally crashed during execution
+    HandlerPanicked
 }

@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
+use std::{io, net::SocketAddr, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use flate2::Compression;
@@ -10,7 +10,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     select,
     sync::mpsc,
-    task::yield_now,
+    task::{yield_now, JoinHandle},
 };
 
 #[cfg(not(feature = "disable-self-signed"))]
@@ -30,7 +30,7 @@ use tokio_tungstenite::{
     },
     WebSocketStream,
 };
-use tracing::{debug, info, info_span, span, trace, warn, Instrument, Level};
+use tracing::{debug, info, info_span, span, trace, warn, Instrument, Level, debug_span};
 use version::{version, Version};
 
 use crate::{
@@ -44,6 +44,7 @@ pub type StateUpdateChannel = mpsc::Sender<Vec<StateUpdate>>;
 
 #[derive(Archive, Serialize, Deserialize)]
 #[archive(check_bytes)]
+/// An update sent from the connection handler to the client to keep connection state synchronized.
 pub struct StateUpdate {
     pub index: usize,
     pub data: Vec<u8>,
@@ -108,41 +109,91 @@ impl ServerConfig {
     }
 }
 
+// /// A RateLimit the server should enforce
+// pub struct RateLimit {
+//     /// The type of rate limit
+//     limit_type: RateLimitType,
+//     /// Requests per second to allow
+//     per_sec: f64,
+//     /// 
+//     block_ip_after: u64
+// }
+
+// pub enum RateLimitType {
+//     /// The rate limit applies per IP address
+//     IpAddr,
+//     /// The rate limit applies per connection
+//     Connection
+// }
+
+// pub enum IpBlock {
+//     /// Tem
+//     Temporary {
+//         after: u64,
+//     },
+//     InMemoryPermanent
+// }
+
+// pub enum BlockCondition {
+//     /// Server will not block IPs
+//     None,
+// }
+
+// impl RateLimit {
+//     fn ip_per_sec(per_sec: f64) {
+//         RateLimit {
+//             limit_type: RateLimitType::IpAddr,
+//             per_sec
+//         }
+//     }
+    
+//     fn connection_per_sec(per_sec: f64) {
+//         RateLimit {
+//             limit_type: RateLimitType::Connection,
+//             per_sec
+//         }
+//     }
+// }
+
 pub const HL_VERSION: &str = version!();
 
 /// The HardLight server, using tokio & tungstenite.
-pub struct Server<T>
+pub struct Server<Factory>
 where
-    T: Fn(
+    Factory: Fn(
         StateUpdateChannel,
         HandlerSubscriptionManager,
         EventEmitter,
     ) -> Box<dyn ServerHandler + Send + Sync>,
-    T: Send + Sync + 'static + Copy,
+    Factory: Send + Sync + 'static + Copy,
 {
     /// The server's configuration.
     pub config: ServerConfig,
-    /// A closure that creates a new handler for each connection.
-    /// The closure is passed a [StateUpdateChannel] that the handler can use
-    /// to send state updates to the runtime.
-    pub factory: T,
+    /// A handler factory that is used to create a new handler for each connection.
+    pub factory: Arc<Factory>,
+    /// HardLight's version string
     hl_version_string: HeaderValue,
+    /// Event switch's event receiver
     event_rx: Option<mpsc::UnboundedReceiver<Event>>,
+    /// Event transmitter for application and handlers
     event_tx: mpsc::UnboundedSender<Event>,
+    /// Application's topic notification receiver
     topic_notif_rx: Option<mpsc::UnboundedReceiver<TopicNotification>>,
+    /// Event switch's topic notification transmitter
     topic_notif_tx: mpsc::UnboundedSender<TopicNotification>,
 }
 
-impl<T> Server<T>
+impl<Factory> Server<Factory>
 where
-    T: Fn(
+    Factory: Fn(
         StateUpdateChannel,
         HandlerSubscriptionManager,
         EventEmitter,
     ) -> Box<dyn ServerHandler + Send + Sync>,
-    T: Send + Sync + 'static + Copy,
+    Factory: Send + Sync + 'static + Copy,
 {
-    pub fn new(config: ServerConfig, factory: T) -> Self {
+    /// Creates a new [Server] with a config and a handler factory.
+    pub fn new(config: ServerConfig, factory: Factory) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (topic_notif_tx, topic_notif_rx) = mpsc::unbounded_channel();
         Self {
@@ -150,7 +201,7 @@ where
                 .parse()
                 .unwrap(),
             config,
-            factory,
+            factory: Arc::new(factory),
             event_rx: Some(event_rx),
             event_tx,
             topic_notif_rx: Some(topic_notif_rx),
@@ -158,16 +209,21 @@ where
         }
     }
 
+    /// Returns a cloned event emitter that allows the application to send events
+    /// to connected HardLight clients
     pub fn get_event_emitter(&self) -> EventEmitter {
         EventEmitter(self.event_tx.clone())
     }
 
+    /// Returns the topic notification receiver or nothing if it's already been taken.
+    /// The server's event switch will send notifications of new or deleted topics to this receiver.
     pub fn get_topic_notifier(
         &mut self,
     ) -> Option<mpsc::UnboundedReceiver<TopicNotification>> {
         self.topic_notif_rx.take()
     }
 
+    /// Starts the server
     pub async fn run(mut self) -> io::Result<()> {
         info!("Booting HL server v{}...", HL_VERSION);
         let acceptor = TlsAcceptor::from(Arc::new(self.config.tls.clone()));
@@ -187,7 +243,7 @@ where
 
         loop {
             if let Ok((stream, peer_addr)) = listener.accept().await {
-                self.handle_connection(
+                self.spawn_connection_handler(
                     stream,
                     acceptor.clone(),
                     peer_addr,
@@ -197,7 +253,8 @@ where
         }
     }
 
-    fn handle_connection(
+    /// Offloads a connection to a new connection handler task
+    fn spawn_connection_handler(
         &self,
         stream: TcpStream,
         acceptor: TlsAcceptor,
@@ -205,223 +262,239 @@ where
         subscription_notification_tx: mpsc::UnboundedSender<
             SubscriptionNotification,
         >,
-    ) {
-        let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
-        let (
-            proxy_subscription_notification_tx,
-            mut proxy_subscription_notification_rx,
-        ) = mpsc::unbounded_channel::<ProxiedSubscriptionNotification>();
-        let handler = (self.factory)(
-            state_change_tx,
-            HandlerSubscriptionManager(proxy_subscription_notification_tx),
-            self.get_event_emitter(),
-        );
+    ) -> JoinHandle<()> {
+        let factory = self.factory.clone();
+        let event_emitter = self.get_event_emitter();
         let version: HeaderValue = self.hl_version_string.clone();
         tokio::spawn(async move {
-            let connection_span =
-                span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
+            // Request handlers send changes to their state to the handler, which sends
+            // them down the wire to the client
+            let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
+            
+            // Request handlers don't directly talk to the event switch, rather they tell
+            // their connection handlers to (un)subscribe from a topic using a ProxiedSubscriptionNotification
+            let (
+                proxy_subscription_notification_tx,
+                mut proxy_subscription_notification_rx,
+            ) = mpsc::unbounded_channel::<ProxiedSubscriptionNotification>();
+            
+            // The handler will run our RPC functions for us
+            let handler = (factory)(
+                state_change_tx,
+                HandlerSubscriptionManager(proxy_subscription_notification_tx),
+                event_emitter,
+            );
+            
+            // Terminate the TLS connection using rustls into a raw byte stream
+            let stream = match acceptor.accept(stream).await {
+                Ok(stream) => stream,
+                Err(_) => return,
+            };
 
-            async move {
-                let stream = match acceptor.accept(stream).await {
-                    Ok(stream) => stream,
-                    Err(_) => return,
-                };
+            trace!("Successfully terminated TLS handshake");
 
-                trace!("Successfully terminated TLS handshake");
+            let mut compression = Compression::default();
 
-                let mut compression = Compression::default();
-
-                let callback = |req: &Request, mut response: Response| {
-                    match req.headers().get("Sec-WebSocket-Protocol") {
-                        Some(req_version) if req_version == &version => {
-                            response.headers_mut().append("Sec-WebSocket-Protocol", version);
-                            trace!("Received valid handshake, upgrading connection to HardLight ({})", req_version.to_str().unwrap());
-                        }
-                        Some(req_version) => {
-                            *response.status_mut() = StatusCode::BAD_REQUEST;
-                            warn!("Invalid request from {}, version mismatch (client gave {:?}, server wanted {:?})", peer_addr, req_version, Some(version));
-                        }
-                        None => {
-                            *response.status_mut() = StatusCode::BAD_REQUEST;
-                            warn!("Invalid request from {}, no version specified", peer_addr);
-                        }
+            // This callback handles HL's protocol handshake in a moment...
+            let callback = |req: &Request, mut response: Response| {
+                match req.headers().get("Sec-WebSocket-Protocol") {
+                    Some(req_version) if req_version == &version => {
+                        response.headers_mut().append("Sec-WebSocket-Protocol", version);
+                        trace!("Received valid handshake, upgrading connection to HardLight ({})", req_version.to_str().unwrap());
                     }
-
-                    compression = req
-                        .headers()
-                        .get("X-HL-Compress")
-                        .and_then(|c| c.to_str().ok())
-                        .and_then(|c| c.parse::<u8>().ok())
-                        .filter(|&c| c <= 9)
-                        .map(|c| {
-                            trace!("Accepted client specified compression level {}", c);
-                            Compression::new(c as u32)
-                        })
-                        .unwrap_or(Compression::default());
-
-                    response.headers_mut().append("X-HL-Compress", compression.level().into());
-
-                    Ok(response)
-                };
-
-                let mut ws_stream = match accept_hdr_async(stream, callback).await {
-                    Ok(ws_stream) => ws_stream,
-                    Err(e) => {
-                        warn!("Error accepting connection from {}: {}", peer_addr, e);
-                        return;
+                    Some(req_version) => {
+                        *response.status_mut() = StatusCode::BAD_REQUEST;
+                        warn!("Invalid request from {}, version mismatch (client gave {:?}, server wanted {:?})", peer_addr, req_version, Some(version));
                     }
-                };
+                    None => {
+                        *response.status_mut() = StatusCode::BAD_REQUEST;
+                        warn!("Invalid request from {}, no version specified", peer_addr);
+                    }
+                }
 
-                trace!("Connection fully established");
+                compression = req
+                    .headers()
+                    .get("X-HL-Compress")
+                    .and_then(|c| c.to_str().ok())
+                    .and_then(|c| c.parse::<u8>().ok())
+                    .filter(|&c| c <= 9)
+                    .map(|c| {
+                        trace!("Accepted client specified compression level {}", c);
+                        Compression::new(c as u32)
+                    })
+                    .unwrap_or(Compression::default());
 
-                // keep track of active RPC calls
-                let mut in_flight = [false; u8::MAX as usize + 1];
+                response.headers_mut().append("X-HL-Compress", compression.level().into());
 
-                let (rpc_tx, mut rpc_rx) = mpsc::channel(u8::MAX as usize + 1);
+                Ok(response)
+            };
 
-                let mut subscriptions: HashMap<Topic, SubscriptionID> = HashMap::new();
-                let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Event>();
+            // Attempt to turn the raw byte stream into HL's WebSocket stream using tungstenite
+            let mut ws_stream = match accept_hdr_async(stream, callback).await {
+                Ok(ws_stream) => ws_stream,
+                Err(e) => {
+                    warn!("Error accepting connection from {}: {}", peer_addr, e);
+                    return;
+                }
+            };
 
-                let handler = Arc::new(handler);
+            trace!("Connection fully established");
 
-                let compression = Arc::new(compression);
+            // keep track of active RPC calls
+            let mut in_flight = [false; u8::MAX as usize + 1];
 
-                trace!("Starting RPC handler loop");
-                loop {
-                    select! {
-                        // await new messages from the client
-                        Some(msg) = ws_stream.next() => {
-                            let msg = match msg {
+            // for rpc request handlers to tell us when it has a response
+            let (rpc_tx, mut rpc_rx) = mpsc::channel(u8::MAX as usize + 1);
+
+            // track our own subscriptions locally
+            let mut subscriptions: HashMap<Topic, SubscriptionID> = HashMap::new();
+            // our connections to the event switch
+            let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Event>();
+            // rpc handlers
+            let handler = Arc::new(handler);
+            // compression level
+            let compression = Arc::new(compression);
+
+            trace!("Starting RPC handler loop");
+            loop {
+                select! {
+                    // await new messages from the client
+                    Some(msg) = ws_stream.next() => {
+                        let msg = match msg {
+                            Ok(msg) => msg,
+                            Err(e) => {
+                                warn!("Error receiving message from client: {}", e);
+                                continue;
+                            }
+                        };
+                        if msg.is_binary() {
+                            // inflate into wire format
+                            let binary = match inflate(&msg.into_data()) {
+                                Some(binary) => binary,
+                                None => {
+                                    warn!("Error decompressing message from client");
+                                    continue;
+                                },
+                            };
+                            
+                            // attempt decode of the message
+                            let msg = match rkyv::from_bytes::<ClientMessage>(&binary) {
                                 Ok(msg) => msg,
                                 Err(e) => {
-                                    warn!("Error receiving message from client: {}", e);
+                                    warn!("Error deserializing message from client: {}", e);
                                     continue;
                                 }
                             };
-                            if msg.is_binary() {
-                                let binary = match inflate(&msg.into_data()) {
-                                    Some(binary) => binary,
-                                    None => {
-                                        warn!("Error decompressing message from client");
-                                        continue;
-                                    },
-                                };
 
-                                let msg = match rkyv::from_bytes::<ClientMessage>(&binary) {
-                                    Ok(msg) => msg,
-                                    Err(e) => {
-                                        warn!("Error deserializing message from client: {}", e);
+                            match msg {
+                                ClientMessage::RPCRequest { id, internal } => {
+                                    let span = span!(Level::DEBUG, "rpc", id = id);
+                                    let _enter = span.enter();
+
+                                    if in_flight[id as usize] {
+                                        warn!("RPC call already in flight. Ignoring.");
                                         continue;
                                     }
-                                };
 
-                                match msg {
-                                    ClientMessage::RPCRequest { id, internal } => {
-                                        let span = span!(Level::DEBUG, "rpc", id = id);
-                                        let _enter = span.enter();
+                                    trace!("Received call from client. Spawning handler task...");
 
-                                        if in_flight[id as usize] {
-                                            warn!("RPC call already in flight. Ignoring.");
-                                            continue;
-                                        }
+                                    let tx = rpc_tx.clone();
+                                    let handler = handler.clone();
+                                    in_flight[id as usize] = true;
+                                    
+                                    tokio::spawn(async move {
+                                        // run the handler in another sandboxed thread to protect from panics
+                                        let msg = match tokio::spawn(async move { handler.handle_rpc_call(&internal).await }).await {
+                                            Ok(output) => ServerMessage::RPCResponse {
+                                                id,
+                                                output,
+                                            },
+                                            Err(_) => ServerMessage::RPCResponse {
+                                                id,
+                                                output: Err(RpcHandlerError::HandlerPanicked),
+                                            }
+                                        };
+                                        
+                                        tx.send(msg).await.unwrap();
+                                    });
 
-                                        trace!("Received call from client. Spawning handler task...");
-
-                                        let tx = rpc_tx.clone();
-                                        let handler = handler.clone();
-                                        in_flight[id as usize] = true;
-                                        tokio::spawn(async move {
-                                            tx.send(
-                                                ServerMessage::RPCResponse {
-                                                    id,
-                                                    output: handler.handle_rpc_call(&internal).await,
-                                                }
-                                            ).await
-                                        });
-
-                                        trace!("Handler task spawned.");
-                                    }
+                                    trace!("Handler task spawned.");
                                 }
                             }
                         }
-                        // await responses from RPC calls
-                        Some(msg) = rpc_rx.recv() => {
-                            let id = match msg {
-                                ServerMessage::RPCResponse { id, .. } => id,
-                                _ => unreachable!(),
-                            };
+                    }
+                    // await responses from RPC calls
+                    Some(msg) = rpc_rx.recv() => {
+                        let id = match msg {
+                            ServerMessage::RPCResponse { id, .. } => id,
+                            _ => unreachable!(),
+                        };
 
-                            let span = span!(Level::DEBUG, "rpc", id = id);
-                            let _enter = span.enter();
+                        let span = span!(Level::DEBUG, "rpc", id = id);
+                        let _enter = span.enter();
 
-                            in_flight[id as usize] = false;
+                        in_flight[id as usize] = false;
 
-                            trace!("RPC call finished. Serializing and sending response...");
+                        trace!("RPC call finished. Serializing and sending response...");
 
-                            Server::<T>::send_msg(msg, &mut ws_stream, compression.clone(), "RPC response").await;
-                        }
-                        // await state updates from the application
-                        Some(state_changes) = state_change_rx.recv() => {
-                            let span = span!(Level::DEBUG, "state_change");
-                            let _enter = span.enter();
+                        Server::<Factory>::send_msg(msg, &mut ws_stream, compression.clone(), "RPC response").await;
+                    }
+                    // await state updates from the application
+                    Some(state_changes) = state_change_rx.recv() => {
+                        let span = span!(Level::DEBUG, "state_change");
+                        let _enter = span.enter();
 
-                            debug!("Received {} state update(s) from application. Serializing and sending...", state_changes.len());
+                        debug!("Received {} state update(s) from application. Serializing and sending...", state_changes.len());
 
-                            Server::<T>::send_msg(ServerMessage::StateChange(state_changes), &mut ws_stream, compression.clone(), "state update").await;
-                        }
-                        // await subscription notifications from the handler
-                        Some(notification) = proxy_subscription_notification_rx.recv() => {
-                            let span = span!(Level::DEBUG, "subscription_notification");
-                            let _enter = span.enter();
+                        Server::<Factory>::send_msg(ServerMessage::StateChange(state_changes), &mut ws_stream, compression.clone(), "state update").await;
+                    }
+                    // await subscription notifications from the handler
+                    Some(notification) = proxy_subscription_notification_rx.recv() => {
+                        let span = span!(Level::DEBUG, "subscription_notification");
+                        let _enter = span.enter();
 
-                            match notification {
-                                ProxiedSubscriptionNotification::Subscribe(topic) => {
-                                    if subscriptions.contains_key(&topic) {
-                                        continue;
-                                    }
-                                    let id = {
-                                        let mut id = [0; 16];
-                                        rand::thread_rng().fill_bytes(&mut id);
-                                        id
-                                    };
-                                    let tx = events_tx.clone();
-                                    subscriptions.insert(topic.clone(), id);
+                        match notification {
+                            ProxiedSubscriptionNotification::Subscribe(topic) => {
+                                if subscriptions.contains_key(&topic) {
+                                    continue;
+                                }
+                                let mut id = [0; 16];
+                                rand::thread_rng().fill_bytes(&mut id);
+                                let tx = events_tx.clone();
+                                subscriptions.insert(topic.clone(), id);
+                                if let Err(e) = subscription_notification_tx.send(
+                                    SubscriptionNotification::Subscribe { topic, id, tx }
+                                ) {
+                                    warn!("Error sending subscription notification to handler: {}", e);
+                                }
+                            },
+                            ProxiedSubscriptionNotification::Unsubscribe(topic) => {
+                                if let Some(id) = subscriptions.remove(&topic) {
                                     if let Err(e) = subscription_notification_tx.send(
-                                        SubscriptionNotification::Subscribe { topic, id, tx }
+                                        SubscriptionNotification::Unsubscribe { topic, id }
                                     ) {
                                         warn!("Error sending subscription notification to handler: {}", e);
                                     }
-                                },
-                                ProxiedSubscriptionNotification::Unsubscribe(topic) => {
-                                    if let Some(id) = subscriptions.remove(&topic) {
-                                        if let Err(e) = subscription_notification_tx.send(
-                                            SubscriptionNotification::Unsubscribe { topic, id }
-                                        ) {
-                                            warn!("Error sending subscription notification to handler: {}", e);
-                                        }
-                                    }
                                 }
-                            };
-                        }
-                        // await events from the event switch
-                        Some(event) = events_rx.recv() => {
-                            let span = span!(Level::DEBUG, "event");
-                            let _enter = span.enter();
+                            }
+                        };
+                    }
+                    // await events from the event switch
+                    Some(event) = events_rx.recv() => {
+                        let span = span!(Level::DEBUG, "event");
+                        let _enter = span.enter();
 
-                            debug!("Received event from application after {:?}. Serializing and sending...", event.created_at.elapsed());
+                        debug!("Received event from application. Serializing and sending...");
 
-                            let Event { topic, payload, .. } = event;
-                            Server::<T>::send_msg(
-                                ServerMessage::NewEvent { topic, payload },
-                                &mut ws_stream, compression.clone(), "Event"
-                            ).await;
-                        }
+                        let Event { topic, payload, .. } = event;
+                        Server::<Factory>::send_msg(
+                            ServerMessage::NewEvent { topic, payload },
+                            &mut ws_stream, compression.clone(), "Event"
+                        ).await;
                     }
                 }
             }
-            .instrument(connection_span)
-            .await
-        });
+        }.instrument(debug_span!("connection", peer_addr = %peer_addr)))
     }
 
     async fn send_msg(
@@ -464,10 +537,13 @@ impl EventEmitter {
     pub async fn emit(&self, topic: &Topic, payload: impl Into<Vec<u8>>) {
         let event = Event::new(topic, payload);
         let _ = self.0.send(event);
+        // tell tokio to shove us at the end of the task queue
+        // this dramatically lowers latency
         yield_now().await;
     }
 }
 
+/// A struct that allows the RPC handler to tell the connection handler about the topics it's interested in
 pub struct HandlerSubscriptionManager(
     mpsc::UnboundedSender<ProxiedSubscriptionNotification>,
 );
@@ -490,6 +566,7 @@ impl HandlerSubscriptionManager {
     Eq, PartialEq, Hash, Clone, Default, Archive, Serialize, Deserialize,
 )]
 #[archive(check_bytes)]
+/// A topic that can be subscribed to.
 pub struct Topic {
     inner: Vec<u8>,
     is_string: bool,
@@ -578,7 +655,6 @@ pub enum ProxiedSubscriptionNotification {
 pub struct Event {
     pub topic: Topic,
     pub payload: Vec<u8>,
-    pub created_at: Instant,
 }
 
 impl Event {
@@ -587,7 +663,6 @@ impl Event {
         Self {
             topic: topic.clone(),
             payload,
-            created_at: Instant::now(),
         }
     }
 }
@@ -668,7 +743,7 @@ impl EventSwitch {
                         trace!("Sending subscription notification to application");
                     }
                     Some(event) = self.new_event_rx.recv() => {
-                        trace!("Received event from application after {:?}", event.created_at.elapsed());
+                        trace!("Received event from application");
                         if let Some(subscribers) = self.subscriptions.get_mut(&event.topic) {
                             trace!("Topic exists, sending event to {} subscribers", subscribers.len());
                             let mut subs_to_remove = vec![];
@@ -685,7 +760,8 @@ impl EventSwitch {
                         } else {
                             trace!("Topic has no subscribers, ignoring event");
                         }
-                        trace!("Finished routing event in {:?}", event.created_at.elapsed());
+                        trace!("Finished routing event");
+                        // tell the runtime to stick us at the end of the task queue
                         yield_now().await;
                     }
             }
