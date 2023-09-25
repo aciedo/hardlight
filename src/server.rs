@@ -254,6 +254,7 @@ where
     }
 
     /// Offloads a connection to a new connection handler task
+    #[inline]
     fn spawn_connection_handler(
         &self,
         stream: TcpStream,
@@ -368,20 +369,14 @@ where
                             }
                         };
                         if msg.is_binary() {
-                            // inflate into wire format
-                            let binary = match inflate(&msg.into_data()) {
-                                Some(binary) => binary,
+                            let msg = match tokio::task::spawn_blocking(move || {
+                                inflate(&msg.into_data()).map(|bytes| {
+                                    rkyv::from_bytes::<ClientMessage>(&bytes).ok()
+                                }).flatten()
+                            }).await.unwrap_or_else(|_| panic!("Background thread panicked.")) {
+                                Some(msg) => msg,
                                 None => {
-                                    warn!("Error decompressing message from client");
-                                    continue;
-                                },
-                            };
-                            
-                            // attempt decode of the message
-                            let msg = match rkyv::from_bytes::<ClientMessage>(&binary) {
-                                Ok(msg) => msg,
-                                Err(e) => {
-                                    warn!("Error deserializing message from client: {}", e);
+                                    warn!("Error decoding message from client");
                                     continue;
                                 }
                             };
@@ -437,7 +432,7 @@ where
 
                         trace!("RPC call finished. Serializing and sending response...");
 
-                        Server::<Factory>::send_msg(msg, &mut ws_stream, compression.clone(), "RPC response").await;
+                        let _ = Server::<Factory>::send_msg(msg, &mut ws_stream, compression.clone(), "RPC response").await;
                     }
                     // await state updates from the application
                     Some(state_changes) = state_change_rx.recv() => {
@@ -446,7 +441,7 @@ where
 
                         debug!("Received {} state update(s) from application. Serializing and sending...", state_changes.len());
 
-                        Server::<Factory>::send_msg(ServerMessage::StateChange(state_changes), &mut ws_stream, compression.clone(), "state update").await;
+                        let _ = Server::<Factory>::send_msg(ServerMessage::StateChange(state_changes), &mut ws_stream, compression.clone(), "state update").await;
                     }
                     // await subscription notifications from the handler
                     Some(notification) = proxy_subscription_notification_rx.recv() => {
@@ -455,25 +450,26 @@ where
 
                         match notification {
                             ProxiedSubscriptionNotification::Subscribe(topic) => {
-                                if subscriptions.contains_key(&topic) {
-                                    continue;
-                                }
-                                let mut id = [0; 16];
-                                rand::thread_rng().fill_bytes(&mut id);
-                                let tx = events_tx.clone();
-                                subscriptions.insert(topic.clone(), id);
-                                if let Err(e) = subscription_notification_tx.send(
-                                    SubscriptionNotification::Subscribe { topic, id, tx }
-                                ) {
-                                    warn!("Error sending subscription notification to handler: {}", e);
+                                if !subscriptions.contains_key(&topic) {
+                                    let mut id = [0; 16];
+                                    rand::thread_rng().fill_bytes(&mut id);
+                                    let tx = events_tx.clone();
+                                    subscriptions.insert(topic.clone(), id);
+                                    if subscription_notification_tx.send(
+                                        SubscriptionNotification::Subscribe { topic: topic.clone(), id, tx }
+                                    ).is_err() {
+                                        warn!("Error sending subscription notification to handler");
+                                        subscriptions.remove(&topic);
+                                    }
                                 }
                             },
                             ProxiedSubscriptionNotification::Unsubscribe(topic) => {
                                 if let Some(id) = subscriptions.remove(&topic) {
-                                    if let Err(e) = subscription_notification_tx.send(
-                                        SubscriptionNotification::Unsubscribe { topic, id }
-                                    ) {
-                                        warn!("Error sending subscription notification to handler: {}", e);
+                                    if subscription_notification_tx.send(
+                                        SubscriptionNotification::Unsubscribe { topic: topic.clone(), id }
+                                    ).is_err() {
+                                        warn!("Error sending subscription notification to handler");
+                                        subscriptions.insert(topic, id);
                                     }
                                 }
                             }
@@ -487,7 +483,7 @@ where
                         debug!("Received event from application. Serializing and sending...");
 
                         let Event { topic, payload, .. } = event;
-                        Server::<Factory>::send_msg(
+                        let _ = Server::<Factory>::send_msg(
                             ServerMessage::NewEvent { topic, payload },
                             &mut ws_stream, compression.clone(), "Event"
                         ).await;
@@ -497,35 +493,28 @@ where
         }.instrument(debug_span!("connection", peer_addr = %peer_addr)))
     }
 
+    #[inline]
     async fn send_msg(
         msg: ServerMessage,
         ws_stream: &mut WebSocketStream<TlsStream<TcpStream>>,
         compression: Arc<Compression>,
         msg_type: &'static str,
-    ) {
-        let msg = match rkyv::to_bytes::<_, 1024>(&msg) {
-            Ok(encoded) => encoded,
-            Err(e) => {
-                warn!("Error serializing {msg_type}: {}", e);
-                return;
-            }
-        };
+    ) -> Result<(), ()> {
+        let msg = tokio::task::spawn_blocking(move || {
+            rkyv::to_bytes::<_, 1024>(&msg)
+                .ok()
+                .and_then(|bytes| deflate(&bytes, *compression))
+        }).await
+          .map_err(|_| {
+              warn!("Background thread panicked while encoding {}", msg_type);
+          })?
+          .ok_or_else(|| {
+              warn!("Error encoding {} for client", msg_type);
+          })?;
 
-        let msg = match deflate(msg.as_ref(), *compression) {
-            Some(msg) => msg,
-            None => {
-                warn!("Error compressing {msg_type}");
-                return;
-            }
-        };
-
-        match ws_stream.send(Message::Binary(msg.into())).await {
-            Ok(_) => trace!("{msg_type} sent"),
-            Err(e) => {
-                warn!("Error sending {msg_type} to client: {}", e);
-                return;
-            }
-        };
+        ws_stream.send(Message::Binary(msg)).await.map_err(|e| {
+            warn!("Error sending {} to client: {}", msg_type, e);
+        })
     }
 }
 
@@ -709,59 +698,38 @@ impl EventSwitch {
         loop {
             select! {
                 Some(notification) = self.subscription_notification_rx.recv() => {
-                        trace!("Received subscription notification from handler");
                         match notification {
                             SubscriptionNotification::Subscribe { topic, id, tx } => {
-                                trace!("Subscription notification is a subscribe");
-                                if let Some(subscribers) = self.subscriptions.get_mut(&topic) {
-                                    trace!("Topic already exists, adding subscriber");
-                                    subscribers.insert(id, tx);
-                                } else {
-                                    trace!("Topic does not exist, creating topic and adding subscriber");
-                                    let mut subscribers = HashMap::new();
-                                    subscribers.insert(id, tx);
-                                    self.subscriptions.insert(topic.clone(), subscribers);
+                                let subscribers = self.subscriptions.entry(topic.clone()).or_insert_with(HashMap::new);
+                                subscribers.insert(id, tx);
+
+                                if subscribers.len() == 1 {
                                     let _ = self.topic_notif_tx.send(TopicNotification::Created(topic));
                                 }
                             }
                             SubscriptionNotification::Unsubscribe { topic, id } => {
-                                trace!("Subscription notification is an unsubscribe");
                                 if let Some(subscribers) = self.subscriptions.get_mut(&topic) {
-                                    trace!("Topic exists, removing subscriber");
                                     subscribers.remove(&id);
-
                                     if subscribers.is_empty() {
-                                        trace!("Topic has no more subscribers, removing topic");
                                         self.subscriptions.remove(&topic);
                                         let _ = self.topic_notif_tx.send(TopicNotification::Removed(topic));
                                     }
-                                } else {
-                                    trace!("Topic does not exist, ignoring unsubscribe");
                                 }
                             }
                         }
-                        trace!("Sending subscription notification to application");
                     }
                     Some(event) = self.new_event_rx.recv() => {
-                        trace!("Received event from application");
                         if let Some(subscribers) = self.subscriptions.get_mut(&event.topic) {
-                            trace!("Topic exists, sending event to {} subscribers", subscribers.len());
                             let mut subs_to_remove = vec![];
                             for (id, connection) in subscribers.iter() {
-                                if let Err(e) = connection.send(event.clone()) {
-                                    warn!("Failed to send event to subscriber: {}", e);
+                                if connection.send(event.clone()).is_err() {
                                     subs_to_remove.push(id.clone());
-                                    warn!("Removing subscriber");
                                 }
                             }
                             for id in subs_to_remove {
                                 subscribers.remove(&id);
                             }
-                        } else {
-                            trace!("Topic has no subscribers, ignoring event");
                         }
-                        trace!("Finished routing event");
-                        // tell the runtime to stick us at the end of the task queue
                         yield_now().await;
                     }
             }

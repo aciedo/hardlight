@@ -11,7 +11,6 @@ use flate2::write::{
     DeflateDecoder as Decompressor, DeflateEncoder as Compressor,
 };
 pub use flate2::Compression;
-use futures_util::Future;
 pub use hardlight_macros::*;
 pub use parking_lot;
 pub use rkyv;
@@ -75,24 +74,24 @@ macro_rules! factory {
 
 /// Awaits a future and serializes the result. This is a helper function for
 /// implementing [ServerHandler::handle_rpc_call].
-pub async fn handle<F, O>(f: F) -> HandlerResult<Vec<u8>>
+pub async fn ser<O>(output: O) -> HandlerResult<Vec<u8>>
 where
-    F: Future<Output = O>,
     O: Serialize<
         CompositeSerializer<
             AlignedSerializer<AlignedVec>,
             FallbackScratch<HeapScratch<1024>, AllocScratch>,
             SharedSerializeMap,
         >,
-    >,
+    > + Send + 'static,
 {
-    let result = f.await;
-    let result = rkyv::to_bytes::<_, 1024>(&result).unwrap();
+    let result = tokio::task::spawn_blocking(move || {
+        rkyv::to_bytes::<_, 1024>(&output).unwrap()
+    }).await.unwrap();
     Ok(result.to_vec())
 }
 
 /// Deserializes a slice of bytes into a type that implements [Archive].
-pub fn deserialize<'a, T>(bytes: &'a [u8]) -> HandlerResult<T>
+pub fn de<'a, T>(bytes: &'a [u8]) -> HandlerResult<T>
 where
     T: rkyv::Archive,
     <T as Archive>::Archived: for<'b> CheckBytes<DefaultValidator<'b>>

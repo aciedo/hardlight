@@ -29,9 +29,9 @@ async fn main() -> Result<(), std::io::Error> {
     // wait for the server to start
     sleep(Duration::from_millis(10)).await;
 
-    let num_clients = 1;
-    let tasks_per_client = 1;
-    let invocs_per_task = 150_000;
+    let num_clients = 5;
+    let tasks_per_client = 10;
+    let invocs_per_task = 50_000;
     let compression = Compression::none();
     info!(
         "Running {} clients, {} tasks per client, {} invocations per task\n",

@@ -39,14 +39,14 @@ impl ServerHandler for Handler {
     }
 
     async fn handle_rpc_call(&self, input: &[u8]) -> HandlerResult<Vec<u8>> {
-        match deserialize(input)? {
+        match de(input)? {
             RpcCall::Increment { amount } => {
-                handle(increment(self, amount)).await
+                ser(increment(self, amount).await).await
             }
             RpcCall::Decrement { amount } => {
-                handle(decrement(self, amount)).await
+                ser(decrement(self, amount).await).await
             }
-            RpcCall::Get {} => handle(get(self)).await,
+            RpcCall::Get {} => ser(get(self).await).await,
             RpcCall::TestOverhead {} => Ok(vec![]),
         }
     }

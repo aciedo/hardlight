@@ -22,7 +22,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
 
         #vis struct StateController {
             state: ::hardlight::tokio::sync::RwLock<#state_ident>,
-            channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<StateUpdate>>>,
+            channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<::hardlight::StateUpdate>>>,
         }
 
         impl StateController {
@@ -50,7 +50,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
         #vis struct StateGuard<'a> {
             state: ::hardlight::tokio::sync::RwLockWriteGuard<'a, #state_ident>,
             starting_state: #state_ident,
-            channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<StateUpdate>>>,
+            channel: std::sync::Arc<::hardlight::tokio::sync::mpsc::Sender<Vec<::hardlight::StateUpdate>>>,
         }
 
         impl<'a> Drop for StateGuard<'a> {
@@ -102,7 +102,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
         impl ::hardlight::ClientState for State {
             fn apply_changes(
                 &mut self,
-                changes: Vec<StateUpdate>,
+                changes: Vec<::hardlight::StateUpdate>,
             ) -> ::hardlight::HandlerResult<()> {
                 for ::hardlight::StateUpdate { index, data } in changes {
                     match index {
