@@ -21,7 +21,7 @@ use service::{Counter, CounterClient};
 async fn main() -> Result<(), std::io::Error> {
     tracing_subscriber::fmt::init();
 
-    let config = ServerConfig::new_self_signed("0.0.0.0:8080");
+    let config = ServerConfig::new_self_signed("localhost:8080");
     info!("{:?}", config);
     let server = Server::new(config, factory!(Handler));
     tokio::spawn(async move { server.run().await.unwrap() });
@@ -38,7 +38,7 @@ async fn main() -> Result<(), std::io::Error> {
         num_clients, tasks_per_client, invocs_per_task
     );
 
-    let (send, mut recv) = mpsc::channel(num_clients*tasks_per_client*invocs_per_task);
+    let (send, mut recv) = mpsc::unbounded_channel();
 
     for _ in 0..num_clients {
         let sender = send.clone();
@@ -70,9 +70,18 @@ async fn main() -> Result<(), std::io::Error> {
     let bar = ProgressBar::new(num_clients as u64 * tasks_per_client as u64 * invocs_per_task as u64).with_style(ProgressStyle::default_bar().template("{spinner:.blue} [{elapsed_precise}] ({eta}) {bar:50.green/blue} {pos:>7}/{len:7} {per_sec} {msg}").unwrap().progress_chars("█░⎯"));
 
     sleep(Duration::from_secs(1)).await;
-    while let Some(elapsed) = recv.recv().await {
-        timings.push(elapsed);
-        bar.inc(1);
+    loop {
+        match timeout(Duration::from_millis(10), recv.recv())
+            .await
+            .ok()
+            .flatten()
+        {
+            Some(elapsed) => {
+                timings.push(elapsed);
+                bar.inc(1);
+            }
+            None => break,
+        };
     }
 
     bar.finish_with_message("done\n");
