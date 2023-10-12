@@ -3,9 +3,10 @@ use hardlight::{
     ServerHandler,
 };
 use indicatif::{ProgressBar, ProgressStyle};
-use plotters::prelude::*;
-use std::sync::Arc;
+use plotters::{prelude::*, style::full_palette::PINK_200};
+use std::{sync::Arc, collections::HashMap};
 use tokio::{
+    runtime::Builder,
     sync::mpsc,
     time::{sleep, timeout, Duration, Instant},
 };
@@ -16,6 +17,11 @@ mod service;
 
 use handler::Handler;
 use service::{Counter, CounterClient};
+
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -86,7 +92,8 @@ async fn main() -> Result<(), std::io::Error> {
 
     bar.finish_with_message("done\n");
 
-    plot_line_graph(&timings);
+    plot_scatter_graph(&timings);
+    plot_histogram_graph(&timings);
 
     timings.sort();
     let sum: u128 = timings.iter().map(|t| t.as_micros()).sum();
@@ -96,9 +103,33 @@ async fn main() -> Result<(), std::io::Error> {
     let med = timings[timings.len() / 2].as_micros();
     let std_dev = timings
         .iter()
-        .map(|t| (t.as_micros() as i128 - avg as i128).pow(2) as u128)
+        .map(|t| (t.as_micros() as u128 - avg as u128).pow(2) as u128)
         .sum::<u128>()
-        / timings.len() as u128;
+        .checked_div(timings.len() as u128)
+        .map(|v| v as f64)
+        .map(|v| v.sqrt())
+        .unwrap_or(0.0)
+        .round() as u128;
+    
+    // count how many timings are between the mean and mean-std_dev
+    let mut count = 0;
+    for timing in timings.iter() {
+        if timing.as_micros() < avg - std_dev {
+            count += 1;
+        }
+    }
+    let percentage = count as f64 / timings.len() as f64 * 100.0;
+    info!("{}% ({}) of timings are below the mean-std_dev", percentage, count);
+    
+    // and the same for mean and mean+std_dev
+    let mut count = 0;
+    for timing in timings.iter() {
+        if timing.as_micros() > avg + std_dev {
+            count += 1;
+        }
+    }
+    let percentage = count as f64 / timings.len() as f64 * 100.0;
+    info!("{}% ({}) of timings are above the mean+std_dev", percentage, count);
 
     plot_percentile_graph(&timings);
 
@@ -114,7 +145,7 @@ fn plot_percentile_graph(timings: &Vec<Duration>) {
         data.push((i as u128, percentile));
     }
     let root =
-        SVGBackend::new("percentile.svg", (1024, 768)).into_drawing_area();
+        BitMapBackend::new("percentile.png", (3840, 2160)).into_drawing_area();
     root.fill(&WHITE).unwrap();
     let mut chart = ChartBuilder::on(&root)
         .caption("Percentile", ("sans-serif", 50).into_font())
@@ -148,12 +179,12 @@ fn plot_percentile_graph(timings: &Vec<Duration>) {
     info!("Percentile graph generated at ./percentile.svg")
 }
 
-fn plot_line_graph(timings: &Vec<Duration>) {
+fn plot_scatter_graph(timings: &Vec<Duration>) {
     // timings isn't sorted
-    let root = SVGBackend::new("line.svg", (1024, 768)).into_drawing_area();
+    let root = BitMapBackend::new("scatter.png", (3840, 2160)).into_drawing_area();
     root.fill(&WHITE).unwrap();
     let mut chart = ChartBuilder::on(&root)
-        .caption("Line", ("sans-serif", 50).into_font())
+        .caption("Scatter", ("sans-serif", 50).into_font())
         .margin(15)
         .x_label_area_size(30)
         .y_label_area_size(30)
@@ -177,9 +208,11 @@ fn plot_line_graph(timings: &Vec<Duration>) {
         data.push((i as u128, timing.as_micros()));
     }
     chart
-        .draw_series(LineSeries::new(data, &RED))
+        .draw_series(PointSeries::of_element(data, 1, ShapeStyle::from(&RED).filled(), &|c, s, st| {
+            return EmptyElement::at(c) + Circle::new((0, 0), s, st.filled());
+        }))
         .unwrap()
-        .label("Line")
+        .label("Scatter")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
 
     // draw average line
@@ -218,7 +251,55 @@ fn plot_line_graph(timings: &Vec<Duration>) {
         .draw()
         .unwrap();
     root.present().unwrap();
-    info!("Line graph generated at ./line.svg")
+    info!("Scatter graph generated at ./scatter.svg")
+}
+
+fn plot_histogram_graph(timings: &Vec<Duration>) {
+    // Create the histogram data
+    let mut histogram: HashMap<u128, u128> = HashMap::new();
+    for timing in timings {
+        let bin = timing.as_micros();
+        *histogram.entry(bin).or_insert(0) += 1;
+    }
+
+    // Convert HashMap to Vec for plotting
+    let mut data: Vec<(u128, u128)> = histogram.into_iter().collect();
+    
+    // Sort data by time
+    data.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let root = BitMapBackend::new("histogram.png", (3840, 2160)).into_drawing_area();
+    root.fill(&WHITE).unwrap();
+    
+    // Use the largest count as max y value, and largest bin (time) * 5 as max x value
+    let max_y_value = data.iter().map(|(_, count)| *count).max().unwrap_or_default();
+    let max_x_value = 1500;
+    
+    // Create the chart builder
+    let mut chart = ChartBuilder::on(&root)
+        .margin(10)
+        .x_label_area_size(30)
+        .y_label_area_size(30)
+        .build_cartesian_2d(
+            0u32..(max_x_value as u32),
+            0u32..(max_y_value as u32),
+        )
+        .unwrap();
+    
+    chart.configure_mesh().y_desc("Number of Invocations").x_desc("Time (us)").axis_desc_style(("sans-serif", 15).into_font()).draw().unwrap();
+    
+    // Define a histogram series with data
+    let histogram = Histogram::vertical(&chart)
+        .style(PINK_200.filled())
+        .data(data.iter().map(|(x, y)| ((*x) as u32, *y as u32)));
+    
+    // Draw the histogram series
+    chart.draw_series(histogram).unwrap();
+
+    // Save the chart
+    root.present().unwrap();
+
+    info!("Histogram graph generated at ./histogram.png")
 }
 
 fn standard_deviation(timings: &Vec<Duration>) -> f64 {

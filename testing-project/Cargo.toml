@@ -12,3 +12,5 @@ tracing = "0.1.37"
 tracing-subscriber = "0.3.16"
 indicatif = { version = "0.17.5", features = ["tokio"] }
 plotters = "0.3.4"
+mimalloc = "0.1.39"
+plotters-bitmap = "0.3.3"
