@@ -346,7 +346,7 @@ where
             let mut in_flight = [false; u8::MAX as usize + 1];
 
             // for rpc request handlers to tell us when it has a response
-            let (rpc_tx, mut rpc_rx) = mpsc::channel(u8::MAX as usize + 1);
+            let (rpc_tx, mut rpc_rx) = mpsc::unbounded_channel();
 
             // track our own subscriptions locally
             let mut subscriptions: HashMap<Topic, SubscriptionID> = HashMap::new();
@@ -360,69 +360,7 @@ where
             trace!("Starting RPC handler loop");
             loop {
                 select! {
-                    // await new messages from the client
-                    Some(msg) = ws_stream.next() => {
-                        let msg = match msg {
-                            Ok(msg) => msg,
-                            Err(e) => {
-                                warn!("Error receiving message from client: {}", e);
-                                continue;
-                            }
-                        };
-                        if msg.is_binary() {
-                            let (send, recv) = oneshot::channel();
-                            rayon::spawn(move || {
-                                let msg = inflate(&msg.into_data()).map(|bytes| {
-                                    rkyv::from_bytes::<ClientMessage>(&bytes).ok()
-                                }).flatten();
-                                let _ = send.send(msg);
-                            });
-                            
-                            let msg = match recv.await.ok().flatten() {
-                                Some(msg) => msg,
-                                None => {
-                                    warn!("Error decoding message from client");
-                                    continue;
-                                }
-                            };
-
-                            match msg {
-                                ClientMessage::RPCRequest { id, internal } => {
-                                    let span = span!(Level::DEBUG, "rpc", id = id);
-                                    let _enter = span.enter();
-
-                                    if in_flight[id as usize] {
-                                        warn!("RPC call already in flight. Ignoring.");
-                                        continue;
-                                    }
-
-                                    trace!("Received call from client. Spawning handler task...");
-
-                                    let tx = rpc_tx.clone();
-                                    let handler = handler.clone();
-                                    in_flight[id as usize] = true;
-                                    
-                                    tokio::spawn(async move {
-                                        // run the handler in another sandboxed thread to protect from panics
-                                        let msg = match tokio::spawn(async move { handler.handle_rpc_call(&internal).await }).await {
-                                            Ok(output) => ServerMessage::RPCResponse {
-                                                id,
-                                                output,
-                                            },
-                                            Err(_) => ServerMessage::RPCResponse {
-                                                id,
-                                                output: Err(RpcHandlerError::HandlerPanicked),
-                                            }
-                                        };
-                                        
-                                        tx.send(msg).await.unwrap();
-                                    });
-
-                                    trace!("Handler task spawned.");
-                                }
-                            }
-                        }
-                    }
+                    biased;
                     // await responses from RPC calls
                     Some(msg) = rpc_rx.recv() => {
                         let id = match msg {
@@ -430,23 +368,21 @@ where
                             _ => unreachable!(),
                         };
 
-                        let span = span!(Level::DEBUG, "rpc", id = id);
-                        let _enter = span.enter();
-
                         in_flight[id as usize] = false;
-
-                        trace!("RPC call finished. Serializing and sending response...");
 
                         let _ = Server::<Factory>::send_msg(msg, &mut ws_stream, compression.clone(), "RPC response").await;
                     }
                     // await state updates from the application
                     Some(state_changes) = state_change_rx.recv() => {
-                        let span = span!(Level::DEBUG, "state_change");
-                        let _enter = span.enter();
-
-                        debug!("Received {} state update(s) from application. Serializing and sending...", state_changes.len());
-
                         let _ = Server::<Factory>::send_msg(ServerMessage::StateChange(state_changes), &mut ws_stream, compression.clone(), "state update").await;
+                    }
+                    // await events from the event switch
+                    Some(event) = events_rx.recv() => {
+                        let Event { topic, payload, .. } = event;
+                        let _ = Server::<Factory>::send_msg(
+                            ServerMessage::NewEvent { topic, payload },
+                            &mut ws_stream, compression.clone(), "Event"
+                        ).await;
                     }
                     // await subscription notifications from the handler
                     Some(notification) = proxy_subscription_notification_rx.recv() => {
@@ -480,20 +416,59 @@ where
                             }
                         };
                     }
-                    // await events from the event switch
-                    Some(event) = events_rx.recv() => {
-                        let span = span!(Level::DEBUG, "event");
-                        let _enter = span.enter();
+                    // await new messages from the client
+                    Some(msg) = ws_stream.next() => {
+                        let msg = match msg {
+                            Ok(msg) => msg,
+                            Err(e) => {
+                                warn!("Error receiving message from client: {}", e);
+                                continue;
+                            }
+                        };
+                        if msg.is_binary() {
+                            let (send, recv) = oneshot::channel();
+                            rayon::spawn_fifo(move || {
+                                let msg = inflate(&msg.into_data()).map(|bytes| {
+                                    rkyv::from_bytes::<ClientMessage>(&bytes).ok()
+                                }).flatten();
+                                let _ = send.send(msg);
+                            });
+                            yield_now().await;
+                            let msg = match recv.await.ok().flatten() {
+                                Some(msg) => msg,
+                                None => {
+                                    warn!("Error decoding message from client");
+                                    continue;
+                                }
+                            };
 
-                        debug!("Received event from application. Serializing and sending...");
+                            match msg {
+                                ClientMessage::RPCRequest { id, internal } => {
+                                    let span = span!(Level::DEBUG, "rpc", id = id);
+                                    let _enter = span.enter();
 
-                        let Event { topic, payload, .. } = event;
-                        let _ = Server::<Factory>::send_msg(
-                            ServerMessage::NewEvent { topic, payload },
-                            &mut ws_stream, compression.clone(), "Event"
-                        ).await;
+                                    if in_flight[id as usize] {
+                                        warn!("RPC call already in flight. Ignoring.");
+                                        continue;
+                                    }
+
+                                    trace!("Received call from client. Spawning handler task...");
+
+                                    let tx = rpc_tx.clone();
+                                    let handler = handler.clone();
+                                    in_flight[id as usize] = true;
+                                    
+                                    tokio::spawn(async move {
+                                        tx.send(ServerMessage::RPCResponse { id, output: handler.handle_rpc_call(&internal).await }).unwrap();
+                                    });
+
+                                    trace!("Handler task spawned.");
+                                }
+                            }
+                        }
                     }
                 }
+                yield_now().await;
             }
         }.instrument(debug_span!("connection", peer_addr = %peer_addr)))
     }
@@ -506,7 +481,7 @@ where
         msg_type: &'static str,
     ) -> Result<(), ()> {
         let (send, recv) = oneshot::channel();
-        rayon::spawn(move || {
+        rayon::spawn_fifo(move || {
             let bytes = rkyv::to_bytes::<_, 1024>(&msg)
                 .ok()
                 .and_then(|bytes| deflate(&bytes, *compression));
@@ -705,41 +680,42 @@ impl EventSwitch {
     async fn run(mut self) {
         loop {
             select! {
+                biased;
+                Some(event) = self.new_event_rx.recv() => {
+                    if let Some(subscribers) = self.subscriptions.get_mut(&event.topic) {
+                        let mut subs_to_remove = vec![];
+                        for (id, connection) in subscribers.iter() {
+                            if connection.send(event.clone()).is_err() {
+                                subs_to_remove.push(id.clone());
+                            }
+                        }
+                        for id in subs_to_remove {
+                            subscribers.remove(&id);
+                        }
+                    }
+                    yield_now().await;
+                }
                 Some(notification) = self.subscription_notification_rx.recv() => {
-                        match notification {
-                            SubscriptionNotification::Subscribe { topic, id, tx } => {
-                                let subscribers = self.subscriptions.entry(topic.clone()).or_insert_with(HashMap::new);
-                                subscribers.insert(id, tx);
+                    match notification {
+                        SubscriptionNotification::Subscribe { topic, id, tx } => {
+                            let subscribers = self.subscriptions.entry(topic.clone()).or_insert_with(HashMap::new);
+                            subscribers.insert(id, tx);
 
-                                if subscribers.len() == 1 {
-                                    let _ = self.topic_notif_tx.send(TopicNotification::Created(topic));
-                                }
-                            }
-                            SubscriptionNotification::Unsubscribe { topic, id } => {
-                                if let Some(subscribers) = self.subscriptions.get_mut(&topic) {
-                                    subscribers.remove(&id);
-                                    if subscribers.is_empty() {
-                                        self.subscriptions.remove(&topic);
-                                        let _ = self.topic_notif_tx.send(TopicNotification::Removed(topic));
-                                    }
-                                }
+                            if subscribers.len() == 1 {
+                                let _ = self.topic_notif_tx.send(TopicNotification::Created(topic));
                             }
                         }
-                    }
-                    Some(event) = self.new_event_rx.recv() => {
-                        if let Some(subscribers) = self.subscriptions.get_mut(&event.topic) {
-                            let mut subs_to_remove = vec![];
-                            for (id, connection) in subscribers.iter() {
-                                if connection.send(event.clone()).is_err() {
-                                    subs_to_remove.push(id.clone());
-                                }
-                            }
-                            for id in subs_to_remove {
+                        SubscriptionNotification::Unsubscribe { topic, id } => {
+                            if let Some(subscribers) = self.subscriptions.get_mut(&topic) {
                                 subscribers.remove(&id);
+                                if subscribers.is_empty() {
+                                    self.subscriptions.remove(&topic);
+                                    let _ = self.topic_notif_tx.send(TopicNotification::Removed(topic));
+                                }
                             }
                         }
-                        yield_now().await;
                     }
+                }
             }
         }
     }

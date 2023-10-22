@@ -35,7 +35,7 @@ async fn main() -> Result<(), std::io::Error> {
     sleep(Duration::from_millis(10)).await;
 
     let num_clients = 50;
-    let tasks_per_client = 3;
+    let tasks_per_client = 4;
     let invocs_per_task = 50_000;
     let compression = Compression::none();
     info!(
@@ -59,7 +59,7 @@ async fn main() -> Result<(), std::io::Error> {
                 tasks.push(tokio::spawn(async move {
                     for _ in 0..invocs_per_task {
                         let start = Instant::now();
-                        let _ = client.test_overhead().await;
+                        let _ = client.test_overhead().await.unwrap();
                         let _ = sender.send(start.elapsed());
                     }
                 }));

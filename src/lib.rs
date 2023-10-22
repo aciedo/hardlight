@@ -26,7 +26,7 @@ use rkyv::{
 pub use rkyv_derive;
 pub use server::*;
 pub use tokio;
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, task::yield_now};
 pub use tokio_macros;
 pub use tokio_tungstenite::tungstenite;
 pub use tracing;
@@ -90,6 +90,7 @@ where
     rayon::spawn(move || {
         let _ = send.send(rkyv::to_bytes::<_, 1024>(&output).unwrap());
     });
+    yield_now().await;
     let result = recv.await.map_err(|_| RpcHandlerError::ServerEncodeError)?;
     Ok(result.to_vec())
 }

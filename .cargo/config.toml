@@ -1,8 +1,8 @@
 [build]
 rustflags = ["-C", "link-arg=-fuse-ld=mold", "--cfg", "tokio_unstable"]
 
-# [profile.release]
-# codegen-units = 1
-# lto = "fat"
+[profile.release]
+codegen-units = 1
+lto = "fat"
 # strip = "debuginfo"
-# opt-level = 3
+opt-level = 3
