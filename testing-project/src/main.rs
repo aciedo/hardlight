@@ -4,9 +4,8 @@ use hardlight::{
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use plotters::{prelude::*, style::full_palette::PINK_200};
-use std::{sync::Arc, collections::HashMap};
+use std::{collections::HashMap, sync::Arc};
 use tokio::{
-    runtime::Builder,
     sync::mpsc,
     time::{sleep, timeout, Duration, Instant},
 };
@@ -35,7 +34,7 @@ async fn main() -> Result<(), std::io::Error> {
     // wait for the server to start
     sleep(Duration::from_millis(10)).await;
 
-    let num_clients = 10;
+    let num_clients = 50;
     let tasks_per_client = 3;
     let invocs_per_task = 50_000;
     let compression = Compression::none();
@@ -110,7 +109,7 @@ async fn main() -> Result<(), std::io::Error> {
         .map(|v| v.sqrt())
         .unwrap_or(0.0)
         .round() as u128;
-    
+
     // count how many timings are between the mean and mean-std_dev
     let mut count = 0;
     for timing in timings.iter() {
@@ -119,8 +118,11 @@ async fn main() -> Result<(), std::io::Error> {
         }
     }
     let percentage = count as f64 / timings.len() as f64 * 100.0;
-    info!("{}% ({}) of timings are below the mean-std_dev", percentage, count);
-    
+    info!(
+        "{}% ({}) of timings are below the mean-std_dev",
+        percentage, count
+    );
+
     // and the same for mean and mean+std_dev
     let mut count = 0;
     for timing in timings.iter() {
@@ -129,7 +131,10 @@ async fn main() -> Result<(), std::io::Error> {
         }
     }
     let percentage = count as f64 / timings.len() as f64 * 100.0;
-    info!("{}% ({}) of timings are above the mean+std_dev", percentage, count);
+    info!(
+        "{}% ({}) of timings are above the mean+std_dev",
+        percentage, count
+    );
 
     plot_percentile_graph(&timings);
 
@@ -153,7 +158,7 @@ fn plot_percentile_graph(timings: &Vec<Duration>) {
         .x_label_area_size(30)
         .y_label_area_size(30)
         // use 99.99th percentile as max
-        .build_cartesian_2d(0u128..100u128, 0u128..1000u128)
+        .build_cartesian_2d(0u128..100u128, 0u128..15000u128)
         .unwrap();
     chart
         .configure_mesh()
@@ -181,7 +186,8 @@ fn plot_percentile_graph(timings: &Vec<Duration>) {
 
 fn plot_scatter_graph(timings: &Vec<Duration>) {
     // timings isn't sorted
-    let root = BitMapBackend::new("scatter.png", (3840, 2160)).into_drawing_area();
+    let root =
+        BitMapBackend::new("scatter.png", (3840, 2160)).into_drawing_area();
     root.fill(&WHITE).unwrap();
     let mut chart = ChartBuilder::on(&root)
         .caption("Scatter", ("sans-serif", 50).into_font())
@@ -208,9 +214,15 @@ fn plot_scatter_graph(timings: &Vec<Duration>) {
         data.push((i as u128, timing.as_micros()));
     }
     chart
-        .draw_series(PointSeries::of_element(data, 1, ShapeStyle::from(&RED).filled(), &|c, s, st| {
-            return EmptyElement::at(c) + Circle::new((0, 0), s, st.filled());
-        }))
+        .draw_series(PointSeries::of_element(
+            data,
+            1,
+            ShapeStyle::from(&RED).filled(),
+            &|c, s, st| {
+                return EmptyElement::at(c)
+                    + Circle::new((0, 0), s, st.filled());
+            },
+        ))
         .unwrap()
         .label("Scatter")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
@@ -264,17 +276,23 @@ fn plot_histogram_graph(timings: &Vec<Duration>) {
 
     // Convert HashMap to Vec for plotting
     let mut data: Vec<(u128, u128)> = histogram.into_iter().collect();
-    
+
     // Sort data by time
     data.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let root = BitMapBackend::new("histogram.png", (3840, 2160)).into_drawing_area();
+    let root =
+        BitMapBackend::new("histogram.png", (3840, 2160)).into_drawing_area();
     root.fill(&WHITE).unwrap();
-    
-    // Use the largest count as max y value, and largest bin (time) * 5 as max x value
-    let max_y_value = data.iter().map(|(_, count)| *count).max().unwrap_or_default();
+
+    // Use the largest count as max y value, and largest bin (time) * 5 as max x
+    // value
+    let max_y_value = data
+        .iter()
+        .map(|(_, count)| *count)
+        .max()
+        .unwrap_or_default();
     let max_x_value = 1500;
-    
+
     // Create the chart builder
     let mut chart = ChartBuilder::on(&root)
         .margin(10)
@@ -285,14 +303,20 @@ fn plot_histogram_graph(timings: &Vec<Duration>) {
             0u32..(max_y_value as u32),
         )
         .unwrap();
-    
-    chart.configure_mesh().y_desc("Number of Invocations").x_desc("Time (us)").axis_desc_style(("sans-serif", 15).into_font()).draw().unwrap();
-    
+
+    chart
+        .configure_mesh()
+        .y_desc("Number of Invocations")
+        .x_desc("Time (us)")
+        .axis_desc_style(("sans-serif", 15).into_font())
+        .draw()
+        .unwrap();
+
     // Define a histogram series with data
     let histogram = Histogram::vertical(&chart)
         .style(PINK_200.filled())
         .data(data.iter().map(|(x, y)| ((*x) as u32, *y as u32)));
-    
+
     // Draw the histogram series
     chart.draw_series(histogram).unwrap();
 

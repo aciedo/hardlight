@@ -9,7 +9,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
-    sync::mpsc,
+    sync::{mpsc, oneshot},
     task::{yield_now, JoinHandle},
 };
 
@@ -225,7 +225,8 @@ where
 
     /// Starts the server
     pub async fn run(mut self) -> io::Result<()> {
-        info!("Booting HL server v{}...", HL_VERSION);
+        let worker_count = num_cpus::get();
+        info!("Booting HL server v{}... with {} workers", HL_VERSION, worker_count);
         let acceptor = TlsAcceptor::from(Arc::new(self.config.tls.clone()));
         let listener = TcpListener::bind(&self.config.address).await?;
         info!("Listening on {} with TLS", self.config.address);
@@ -369,11 +370,15 @@ where
                             }
                         };
                         if msg.is_binary() {
-                            let msg = match tokio::task::spawn_blocking(move || {
-                                inflate(&msg.into_data()).map(|bytes| {
+                            let (send, recv) = oneshot::channel();
+                            rayon::spawn(move || {
+                                let msg = inflate(&msg.into_data()).map(|bytes| {
                                     rkyv::from_bytes::<ClientMessage>(&bytes).ok()
-                                }).flatten()
-                            }).await.unwrap_or_else(|_| panic!("Background thread panicked.")) {
+                                }).flatten();
+                                let _ = send.send(msg);
+                            });
+                            
+                            let msg = match recv.await.ok().flatten() {
                                 Some(msg) => msg,
                                 None => {
                                     warn!("Error decoding message from client");
@@ -500,11 +505,14 @@ where
         compression: Arc<Compression>,
         msg_type: &'static str,
     ) -> Result<(), ()> {
-        let msg = tokio::task::spawn_blocking(move || {
-            rkyv::to_bytes::<_, 1024>(&msg)
+        let (send, recv) = oneshot::channel();
+        rayon::spawn(move || {
+            let bytes = rkyv::to_bytes::<_, 1024>(&msg)
                 .ok()
-                .and_then(|bytes| deflate(&bytes, *compression))
-        }).await
+                .and_then(|bytes| deflate(&bytes, *compression));
+            let _ = send.send(bytes);
+        });
+        let msg = recv.await
           .map_err(|_| {
               warn!("Background thread panicked while encoding {}", msg_type);
           })?

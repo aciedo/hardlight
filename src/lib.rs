@@ -26,6 +26,7 @@ use rkyv::{
 pub use rkyv_derive;
 pub use server::*;
 pub use tokio;
+use tokio::sync::oneshot;
 pub use tokio_macros;
 pub use tokio_tungstenite::tungstenite;
 pub use tracing;
@@ -77,16 +78,19 @@ macro_rules! factory {
 pub async fn ser<O>(output: O) -> HandlerResult<Vec<u8>>
 where
     O: Serialize<
-        CompositeSerializer<
-            AlignedSerializer<AlignedVec>,
-            FallbackScratch<HeapScratch<1024>, AllocScratch>,
-            SharedSerializeMap,
-        >,
-    > + Send + 'static,
+            CompositeSerializer<
+                AlignedSerializer<AlignedVec>,
+                FallbackScratch<HeapScratch<1024>, AllocScratch>,
+                SharedSerializeMap,
+            >,
+        > + Send
+        + 'static,
 {
-    let result = tokio::task::spawn_blocking(move || {
-        rkyv::to_bytes::<_, 1024>(&output).unwrap()
-    }).await.unwrap();
+    let (send, recv) = oneshot::channel();
+    rayon::spawn(move || {
+        let _ = send.send(rkyv::to_bytes::<_, 1024>(&output).unwrap());
+    });
+    let result = recv.await.map_err(|_| RpcHandlerError::ServerEncodeError)?;
     Ok(result.to_vec())
 }
 

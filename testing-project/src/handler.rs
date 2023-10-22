@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::service::*;
 use hardlight::*;
+use tokio::time::sleep;
 
 pub struct Handler {
     // the runtime will provide the state when it creates the handler
@@ -40,7 +41,10 @@ impl ServerHandler for Handler {
                 let state = self.state.read().await;
                 ser(state.counter).await
             }
-            RpcCall::TestOverhead {} => Ok(vec![]),
+            RpcCall::TestOverhead {} => {
+                sleep(Duration::from_millis(10)).await;
+                Ok(vec![])
+            }
         }
     }
 }

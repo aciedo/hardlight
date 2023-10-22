@@ -28,6 +28,8 @@ rkyv_derive = { version = "0.7.40", features = ["copy"] }
 hashbrown = { version = "0.14.0", features = ["rkyv"] }
 rand = "0.8.5"
 rkyv = { version = "0.7.42", features = ["copy", "validation"] }
+num_cpus = "1.16.0"
+rayon = "1.8.0"
 
 [dependencies.flate2]
 version = "1.0.17"
